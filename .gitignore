@@ -1,0 +1,24 @@
+# Environment variables (contains private tokens)
+.env
+
+# SQLite Databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Python caching and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Virtual environment
+venv/
+.venv/
+env/
