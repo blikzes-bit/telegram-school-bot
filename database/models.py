@@ -12,6 +12,8 @@ class Chat(Base):
     hw_reminder_time = Column(String, default="18:00", nullable=False)  # HH:MM format
     schedule_reminder_time = Column(String, default="20:00", nullable=False)  # HH:MM format
     is_onboarded = Column(Boolean, default=False, nullable=False)
+    last_hw_reminder_date = Column(Date, nullable=True)
+    last_sch_reminder_date = Column(Date, nullable=True)
 
     # Relationships
     lesson_slots = relationship("LessonSlot", back_populates="chat", cascade="all, delete-orphan")

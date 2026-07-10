@@ -8,6 +8,7 @@ from database.db import get_schedule, get_lesson_slots, update_schedule_slot, sa
 from keyboards.inline import get_schedule_days_keyboard, DAYS_RU, DAYS_SHORT_RU, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
+from utils import escape_markdown
 
 router = Router()
 tz = pytz.timezone(TIMEZONE)
@@ -57,7 +58,7 @@ async def format_schedule_message(chat_id: int, day_idx: int) -> str:
             else:
                 emoji = "📘"
         
-        sub_text = f"**{subject}**" if subject else "_[Свободно]_"
+        sub_text = f"**{escape_markdown(subject)}**" if subject else "_Свободно_"
         message_text += f"{num}️⃣ `{start} - {end}` | {emoji} {sub_text}\n"
         
     if not has_any:

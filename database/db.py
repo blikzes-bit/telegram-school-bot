@@ -1,6 +1,6 @@
 import datetime
 from typing import List, Dict, Optional, Tuple
-from sqlalchemy import select, update, delete, event
+from sqlalchemy import select, update, delete, event, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from database.models import Base, Chat, LessonSlot, Schedule, Homework
 from config import DATABASE_URL
@@ -18,6 +18,15 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=As
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Migrate existing DB (if columns don't exist)
+        try:
+            await conn.execute(text("ALTER TABLE chats ADD COLUMN last_hw_reminder_date DATE"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE chats ADD COLUMN last_sch_reminder_date DATE"))
+        except Exception:
+            pass
 
 async def get_or_create_chat(chat_id: int, chat_type: str) -> Chat:
     async with AsyncSessionLocal() as session:
@@ -172,4 +181,18 @@ async def get_homework_due_on(chat_id: int, due_date: datetime.date) -> List[Hom
 async def delete_chat(chat_id: int):
     async with AsyncSessionLocal() as session:
         await session.execute(delete(Chat).where(Chat.chat_id == chat_id))
+        await session.commit()
+
+async def update_last_hw_reminder_date(chat_id: int, date: datetime.date):
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(last_hw_reminder_date=date)
+        )
+        await session.commit()
+
+async def update_last_sch_reminder_date(chat_id: int, date: datetime.date):
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(last_sch_reminder_date=date)
+        )
         await session.commit()
