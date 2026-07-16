@@ -8,7 +8,7 @@ from database.db import get_schedule, get_lesson_slots, update_schedule_slot, sa
 from keyboards.inline import get_schedule_days_keyboard, DAYS_RU, DAYS_SHORT_RU, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
-from utils import escape_markdown
+from utils import escape_markdown, safe_edit_text
 
 router = Router()
 tz = pytz.timezone(TIMEZONE)
@@ -84,7 +84,7 @@ async def process_day_select(callback: CallbackQuery):
     day_idx = int(callback.data.split(":")[1])
     text = await format_schedule_message(callback.message.chat.id, day_idx)
     kb = get_schedule_days_keyboard(day_idx)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("sch_edit:"))

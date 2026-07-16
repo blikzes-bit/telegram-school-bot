@@ -31,7 +31,6 @@ async def send_hw_reminder(bot: Bot, chat_id: int, tz: pytz.BaseTzInfo):
                     "🎉 Отличные новости! На завтра нет записанных домашних заданий.",
                     parse_mode="Markdown"
                 )
-                await update_last_hw_reminder_date(chat_id, today)
             except TelegramAPIError as e:
                 logger.warning(f"Failed to send HW reminder to {chat_id}: {e}")
         return
@@ -44,7 +43,6 @@ async def send_hw_reminder(bot: Bot, chat_id: int, tz: pytz.BaseTzInfo):
 
     try:
         await bot.send_message(chat_id, text, parse_mode="Markdown")
-        await update_last_hw_reminder_date(chat_id, today)
     except TelegramAPIError as e:
         logger.warning(f"Failed to send HW reminder to {chat_id}: {e}")
 
@@ -75,7 +73,6 @@ async def send_schedule_reminder(bot: Bot, chat_id: int, tz: pytz.BaseTzInfo):
 
     try:
         await bot.send_message(chat_id, text, parse_mode="Markdown")
-        await update_last_sch_reminder_date(chat_id, today)
     except TelegramAPIError as e:
         logger.warning(f"Failed to send schedule reminder to {chat_id}: {e}")
 
@@ -96,12 +93,16 @@ async def check_and_send_reminders(bot: Bot):
         if (current_hour_min >= (hw_h, hw_m)) and chat.last_hw_reminder_date != today:
             logger.info(f"Triggering HW reminder for chat {chat.chat_id}")
             await send_hw_reminder(bot, chat.chat_id, tz)
+            # Stamp the date once per day so we don't re-check every minute
+            await update_last_hw_reminder_date(chat.chat_id, today)
 
         # Check schedule reminder: trigger if current time >= scheduled time AND not yet sent today
         sch_h, sch_m = map(int, chat.schedule_reminder_time.split(":"))
         if (current_hour_min >= (sch_h, sch_m)) and chat.last_sch_reminder_date != today:
             logger.info(f"Triggering schedule reminder for chat {chat.chat_id}")
             await send_schedule_reminder(bot, chat.chat_id, tz)
+            # Stamp the date once per day so we don't re-check every minute
+            await update_last_sch_reminder_date(chat.chat_id, today)
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()

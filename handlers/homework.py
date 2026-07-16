@@ -13,7 +13,7 @@ from database.db import get_homework, add_homework, mark_homework_completed, del
 from keyboards.inline import get_homework_action_keyboard, get_cancel_keyboard, DAYS_RU
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
-from utils import escape_markdown
+from utils import escape_markdown, safe_edit_text
 
 router = Router()
 tz = pytz.timezone(TIMEZONE)
@@ -84,7 +84,7 @@ async def show_homework(message: Message):
 @router.callback_query(F.data == "hw_list_active")
 async def process_hw_list_active(callback: CallbackQuery):
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
 @router.callback_query(F.data == "hw_archive")

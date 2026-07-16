@@ -38,30 +38,6 @@ def get_yes_no_markup() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def get_time_preset_keyboard(lesson_num: int) -> InlineKeyboardMarkup:
-    """Returns quick-pick time buttons for a lesson slot."""
-    buttons = []
-    for start, end in STANDARD_TIMES:
-        btn_text = f"⏰ {start}" if lesson_num == 1 else f"⏰ {end}"
-        # Show start for first lesson, then shift through ends for subsequent
-        display = f"{start}" if lesson_num == 1 else f"{end}"
-        buttons.append([InlineKeyboardButton(
-            text=f"⏰ {display}",
-            callback_data=f"ob_time:{lesson_num}:{display} - end_placeholder"
-        )])
-    # Actually let's show the full pair as a full suggestion
-    buttons = []
-    if lesson_num == 1:
-        for start, _ in STANDARD_TIMES:
-            # Format: HH:MM - HH:MM
-            # Calculate end: start + 45 min
-            h, m = map(int, start.split(":"))
-            total = h * 60 + m + 45
-            end = f"{total // 60:02d}:{total % 60:02d}"
-            slot_str = f"{start} - {end}"
-            buttons.append([InlineKeyboardButton(text=f"⏰ {slot_str}", callback_data=f"ob_time:{slot_str}")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-
 TIME_PATTERN = re.compile(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]\s*-\s*([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
 
 def build_time_keyboard() -> InlineKeyboardMarkup:

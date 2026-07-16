@@ -9,6 +9,7 @@ from keyboards.inline import get_onboarding_start_keyboard
 router = Router()
 
 @router.message(CommandStart())
+@router.message(F.text == "🚀 Начать настройку")
 async def cmd_start(message: Message, state: FSMContext):
     # Clear any active states
     await state.clear()
