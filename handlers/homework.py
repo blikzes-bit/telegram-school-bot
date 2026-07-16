@@ -77,12 +77,14 @@ async def format_homework_list(chat_id: int, is_archive: bool = False) -> Tuple[
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.message(F.text == "📝 Домашнее задание")
-async def show_homework(message: Message):
+async def show_homework(message: Message, state: FSMContext):
+    await state.clear()
     text, kb = await format_homework_list(message.chat.id, is_archive=False)
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data == "hw_list_active")
-async def process_hw_list_active(callback: CallbackQuery):
+async def process_hw_list_active(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
     await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()

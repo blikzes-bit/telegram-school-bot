@@ -67,7 +67,8 @@ async def format_schedule_message(chat_id: int, day_idx: int) -> str:
     return message_text
 
 @router.message(F.text == "📅 Расписание")
-async def show_schedule(message: Message):
+async def show_schedule(message: Message, state: FSMContext):
+    await state.clear()
     # Determine current day of week (0=Mon, 6=Sun) based on configured timezone
     now = datetime.datetime.now(tz)
     current_day = now.weekday()
@@ -80,7 +81,8 @@ async def show_schedule(message: Message):
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("sch_day:"))
-async def process_day_select(callback: CallbackQuery):
+async def process_day_select(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     day_idx = int(callback.data.split(":")[1])
     text = await format_schedule_message(callback.message.chat.id, day_idx)
     kb = get_schedule_days_keyboard(day_idx)

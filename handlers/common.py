@@ -38,7 +38,8 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
-async def cmd_help(message: Message):
+async def cmd_help(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer(
         "📓 **Школьный Помощник** — справка по командам и функциям:\n\n"
         "📅 **Расписание**: Показывает расписание на выбранный день недели и время уроков. "

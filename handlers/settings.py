@@ -27,7 +27,8 @@ async def format_settings_message(chat_id: int) -> str:
 
 @router.message(F.text == "⏰ Напоминания")
 @router.message(F.text == "⚙️ Настройки")
-async def show_settings(message: Message):
+async def show_settings(message: Message, state: FSMContext):
+    await state.clear()
     text = await format_settings_message(message.chat.id)
     kb = get_settings_keyboard()
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
