@@ -1,0 +1,14 @@
+.git
+.gitignore
+.github
+.env
+.env.example
+*.db
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv/
+test_db_flow.py
+README.md
