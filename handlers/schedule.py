@@ -1,6 +1,7 @@
 import datetime
 import pytz
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,10 +9,15 @@ from database.db import get_schedule, get_lesson_slots, update_schedule_slot, sa
 from keyboards.inline import get_schedule_days_keyboard, DAYS_RU, DAYS_SHORT_RU, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
-from utils import escape_markdown, safe_edit_text
+from utils import (
+    escape_markdown, safe_edit_text,
+    parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN,
+)
 
 router = Router()
 tz = pytz.timezone(TIMEZONE)
+
+NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь сообщение текстом (или нажми «❌ Отмена»)."
 
 class EditScheduleStates(StatesGroup):
     waiting_for_subject_name = State()
@@ -139,13 +145,20 @@ async def initiate_slot_edit(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(EditScheduleStates.waiting_for_subject_name)
+@router.message(EditScheduleStates.waiting_for_subject_name, F.text)
 async def process_new_subject_name(message: Message, state: FSMContext):
     subject = message.text.strip()
+
+    if len(subject) > MAX_SUBJECT_LEN:
+        await message.answer(
+            f"Слишком длинное название предмета (макс. {MAX_SUBJECT_LEN} символов). Введите короче:"
+        )
+        return
+
     data = await state.get_data()
     day_idx = data["edit_day_idx"]
     lesson_num = data["edit_lesson_num"]
-    
+
     normalized_sub = "" if subject.lower() in ["skip", "пропустить", "-", "нет"] else subject
     
     await update_schedule_slot(message.chat.id, day_idx, lesson_num, normalized_sub)
@@ -173,7 +186,7 @@ async def initiate_edit_times(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(EditScheduleStates.waiting_for_lessons_count)
+@router.message(EditScheduleStates.waiting_for_lessons_count, F.text)
 async def process_edit_lessons_count(message: Message, state: FSMContext):
     text = message.text.strip()
     if not text.isdigit() or not (1 <= int(text) <= 10):
@@ -189,32 +202,27 @@ async def process_edit_lessons_count(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-import re
-TIME_PATTERN = re.compile(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]\s*-\s*([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
-
-@router.message(EditScheduleStates.waiting_for_lesson_times)
+@router.message(EditScheduleStates.waiting_for_lesson_times, F.text)
 async def process_edit_lesson_times(message: Message, state: FSMContext):
     text = message.text.strip()
-    if not TIME_PATTERN.match(text):
-        await message.answer(
-            "Неверный формат времени! Пожалуйста, напиши в формате `ЧЧ:ММ - ЧЧ:ММ`.\n"
-            "Пример: `08:30 - 09:15`",
-            parse_mode="Markdown"
-        )
-        return
-        
-    parts = text.split("-")
-    start = parts[0].strip()
-    end = parts[1].strip()
-    
+
     data = await state.get_data()
     lesson_slots = data.get("lesson_slots", [])
     current_lesson_idx = data.get("current_lesson_idx", 1)
     lessons_count = data.get("lessons_count")
-    
-    lesson_slots.append((current_lesson_idx, start, end))
+
+    prev_end = lesson_slots[-1][2] if lesson_slots else None
+    try:
+        start, end = parse_time_interval(text)
+        validate_against_previous(start, prev_end)
+    except ValueError as e:
+        # Leave state/accumulated slots untouched on error.
+        await message.answer(f"⚠️ {e}", parse_mode="Markdown")
+        return
+
+    lesson_slots = lesson_slots + [(current_lesson_idx, start, end)]
     await state.update_data(lesson_slots=lesson_slots)
-    
+
     if current_lesson_idx < lessons_count:
         current_lesson_idx += 1
         await state.update_data(current_lesson_idx=current_lesson_idx)
@@ -236,3 +244,18 @@ async def process_edit_lesson_times(message: Message, state: FSMContext):
         text = await format_schedule_message(message.chat.id, 0)
         kb = get_schedule_days_keyboard(0)
         await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+
+# --- Fallback: non-text content during a schedule-edit step ---
+async def schedule_non_text(message: Message):
+    await message.answer(NON_TEXT_HINT)
+
+
+router.message.register(
+    schedule_non_text,
+    StateFilter(
+        EditScheduleStates.waiting_for_subject_name,
+        EditScheduleStates.waiting_for_lessons_count,
+        EditScheduleStates.waiting_for_lesson_times,
+    ),
+)

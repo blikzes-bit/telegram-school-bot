@@ -1,7 +1,11 @@
-aiogram>=3.13.0
-SQLAlchemy>=2.0.0
+aiogram>=3.13.0,<4.0.0
+SQLAlchemy>=2.0.0,<3.0.0
 greenlet>=3.0.0
-aiosqlite>=0.20.0
-apscheduler>=3.10.0
-python-dotenv>=1.0.0
+aiosqlite>=0.20.0,<0.22.0
+apscheduler>=3.10.0,<4.0.0
+python-dotenv>=1.0.0,<2.0.0
 pytz>=2024.1
+
+# --- Test-only dependencies ---
+pytest>=8.0.0,<9.0.0
+pytest-asyncio>=0.24.0,<0.27.0

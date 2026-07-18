@@ -1,5 +1,5 @@
-import re
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (
@@ -10,8 +10,11 @@ from aiogram.types import (
 from database.db import get_or_create_chat, set_onboarded, save_lesson_slots, save_schedule_day
 from keyboards.reply import get_main_menu
 from keyboards.inline import DAYS_RU
+from utils import parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN
 
 router = Router()
+
+NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь сообщение текстом (или используй кнопки ниже)."
 
 # Standard school lesson time presets (can be adjusted)
 STANDARD_TIMES = [
@@ -37,8 +40,6 @@ def get_yes_no_markup() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text="✅ Да"), KeyboardButton(text="❌ Нет")]],
         resize_keyboard=True
     )
-
-TIME_PATTERN = re.compile(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]\s*-\s*([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
 
 def build_time_keyboard() -> InlineKeyboardMarkup:
     """Quick-pick buttons for lesson times."""
@@ -103,7 +104,7 @@ async def cancel_onboarding(message: Message, state: FSMContext):
         )
     )
 
-@router.message(OnboardingStates.waiting_for_lessons_count)
+@router.message(OnboardingStates.waiting_for_lessons_count, F.text)
 async def process_lessons_count(message: Message, state: FSMContext):
     text = message.text.strip()
     if not text.isdigit() or not (1 <= int(text) <= 10):
@@ -127,31 +128,38 @@ async def process_lessons_count(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-async def _save_time_slot(state: FSMContext, chat_id: int, slot_str: str) -> bool:
+async def _save_time_slot(state: FSMContext, chat_id: int, slot_str: str):
     """
-    Parses 'HH:MM - HH:MM', saves to state, returns True when all slots are done.
-    Returns False if more slots remain, None on format error.
-    """
-    if not TIME_PATTERN.match(slot_str.strip()):
-        return None  # signal error
-    parts = slot_str.split("-", 1)
-    start = parts[0].strip()
-    end = parts[1].strip()
+    Parses 'HH:MM - HH:MM', validates it and appends to state.
 
+    Returns a ``(done, error)`` tuple:
+      * ``error`` is a user-facing message when the interval is invalid
+        (bad format, start not before end, overlaps the previous lesson);
+        in that case state is left completely untouched.
+      * ``done`` is ``True`` once all lesson slots have been collected and
+        persisted, ``False`` while more slots remain.
+    """
     data = await state.get_data()
     lesson_slots = data.get("lesson_slots", [])
     current_lesson_idx = data.get("current_lesson_idx", 1)
     lessons_count = data.get("lessons_count")
 
-    lesson_slots.append((current_lesson_idx, start, end))
-    await state.update_data(lesson_slots=lesson_slots)
+    prev_end = lesson_slots[-1][2] if lesson_slots else None
+    try:
+        start, end = parse_time_interval(slot_str)
+        validate_against_previous(start, prev_end)
+    except ValueError as e:
+        return False, str(e)
+
+    new_slots = lesson_slots + [(current_lesson_idx, start, end)]
+    await state.update_data(lesson_slots=new_slots)
 
     if current_lesson_idx < lessons_count:
         await state.update_data(current_lesson_idx=current_lesson_idx + 1)
-        return False  # more slots remain
+        return False, None  # more slots remain
     else:
-        await save_lesson_slots(chat_id, lesson_slots)
-        return True   # done
+        await save_lesson_slots(chat_id, new_slots)
+        return True, None   # done
 
 async def _start_schedule_setup(message: Message, state: FSMContext, lesson_slots):
     """Start day-by-day schedule collection after lesson times are set."""
@@ -179,10 +187,10 @@ async def _start_schedule_setup(message: Message, state: FSMContext, lesson_slot
 @router.callback_query(OnboardingStates.waiting_for_lesson_times, F.data.startswith("ob_time:"))
 async def process_time_preset(callback: CallbackQuery, state: FSMContext):
     slot_str = callback.data[len("ob_time:"):]
-    done = await _save_time_slot(state, callback.message.chat.id, slot_str)
+    done, error = await _save_time_slot(state, callback.message.chat.id, slot_str)
 
-    if done is None:
-        await callback.answer("Ошибка формата времени!", show_alert=True)
+    if error:
+        await callback.answer(error, show_alert=True)
         return
 
     await callback.answer()
@@ -201,15 +209,12 @@ async def process_time_preset(callback: CallbackQuery, state: FSMContext):
         await _start_schedule_setup(callback.message, state, data["lesson_slots"])
 
 # Text time entry handler
-@router.message(OnboardingStates.waiting_for_lesson_times)
+@router.message(OnboardingStates.waiting_for_lesson_times, F.text)
 async def process_lesson_times_text(message: Message, state: FSMContext):
-    done = await _save_time_slot(state, message.chat.id, message.text.strip())
+    done, error = await _save_time_slot(state, message.chat.id, message.text.strip())
 
-    if done is None:
-        await message.answer(
-            "Неверный формат! Укажи время как `ЧЧ:ММ - ЧЧ:ММ` (например, `08:30 - 09:15`):",
-            parse_mode="Markdown"
-        )
+    if error:
+        await message.answer(f"⚠️ {error}", parse_mode="Markdown")
         return
 
     if not done:
@@ -235,9 +240,20 @@ def _get_subject_keyboard(day_idx: int, lesson_num: int, prev_day_lessons=None) 
     buttons.append([KeyboardButton(text="❌ Сбросить настройку")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-@router.message(OnboardingStates.waiting_for_schedule_subjects)
+SCHEDULE_ACTION_BUTTONS = {"⬅️ Назад", "📋 Скопировать вчерашний день", "⏭️ Пропустить"}
+
+
+@router.message(OnboardingStates.waiting_for_schedule_subjects, F.text)
 async def process_schedule_subjects(message: Message, state: FSMContext):
     subject_input = message.text.strip()
+
+    # Cap real subject names (action buttons are short and exempt).
+    if subject_input not in SCHEDULE_ACTION_BUTTONS and len(subject_input) > MAX_SUBJECT_LEN:
+        await message.answer(
+            f"Слишком длинное название предмета (макс. {MAX_SUBJECT_LEN} символов). Введите короче:"
+        )
+        return
+
     data = await state.get_data()
 
     target_days = data["target_days"]
@@ -395,7 +411,7 @@ async def _finalize_onboarding(message, state, all_schedule_data):
         parse_mode="Markdown"
     )
 
-@router.message(OnboardingStates.waiting_for_saturday_decision)
+@router.message(OnboardingStates.waiting_for_saturday_decision, F.text)
 async def process_saturday_decision(message: Message, state: FSMContext):
     text = message.text.strip().lower()
     data = await state.get_data()
@@ -426,3 +442,19 @@ async def process_saturday_decision(message: Message, state: FSMContext):
         await _finalize_onboarding(message, state, all_schedule_data)
     else:
         await message.answer("Пожалуйста, ответь Да или Нет.")
+
+
+# --- Fallback: non-text content during any onboarding step ---
+async def onboarding_non_text(message: Message):
+    await message.answer(NON_TEXT_HINT)
+
+
+router.message.register(
+    onboarding_non_text,
+    StateFilter(
+        OnboardingStates.waiting_for_lessons_count,
+        OnboardingStates.waiting_for_lesson_times,
+        OnboardingStates.waiting_for_schedule_subjects,
+        OnboardingStates.waiting_for_saturday_decision,
+    ),
+)

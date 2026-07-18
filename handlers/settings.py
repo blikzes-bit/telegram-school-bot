@@ -1,5 +1,6 @@
 import re
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,6 +9,8 @@ from keyboards.inline import get_settings_keyboard, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 
 router = Router()
+
+NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь время текстом в формате `ЧЧ:ММ`."
 
 class SettingStates(StatesGroup):
     waiting_for_hw_time = State()
@@ -57,7 +60,7 @@ async def edit_sch_reminder(callback: CallbackQuery, state: FSMContext):
 
 TIME_FORMAT = re.compile(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
 
-@router.message(SettingStates.waiting_for_hw_time)
+@router.message(SettingStates.waiting_for_hw_time, F.text)
 async def process_hw_time(message: Message, state: FSMContext):
     text = message.text.strip()
     if not TIME_FORMAT.match(text):
@@ -77,7 +80,7 @@ async def process_hw_time(message: Message, state: FSMContext):
     settings_text = await format_settings_message(message.chat.id)
     await message.answer(settings_text, reply_markup=get_settings_keyboard(), parse_mode="Markdown")
 
-@router.message(SettingStates.waiting_for_sch_time)
+@router.message(SettingStates.waiting_for_sch_time, F.text)
 async def process_sch_time(message: Message, state: FSMContext):
     text = message.text.strip()
     if not TIME_FORMAT.match(text):
@@ -144,3 +147,17 @@ async def execute_reset(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🚀 Начать настройку", callback_data="ob_start")]
         ])
     )
+
+
+# --- Fallback: non-text content while awaiting a reminder time ---
+async def settings_non_text(message: Message):
+    await message.answer(NON_TEXT_HINT, parse_mode="Markdown")
+
+
+router.message.register(
+    settings_non_text,
+    StateFilter(
+        SettingStates.waiting_for_hw_time,
+        SettingStates.waiting_for_sch_time,
+    ),
+)
