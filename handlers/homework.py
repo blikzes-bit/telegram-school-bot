@@ -10,8 +10,11 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
-from database.db import get_homework, add_homework, mark_homework_completed, delete_homework, get_schedule
-from keyboards.inline import get_homework_action_keyboard, get_cancel_keyboard, DAYS_RU
+from database.db import (
+    get_homework, add_homework, mark_homework_completed, delete_homework, get_schedule,
+    get_homework_by_id, update_homework,
+)
+from keyboards.inline import get_homework_action_keyboard, get_homework_edit_menu_keyboard, get_cancel_keyboard, DAYS_RU
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
 from utils import (
@@ -29,6 +32,10 @@ class AddHomeworkStates(StatesGroup):
     waiting_for_subject = State()
     waiting_for_description = State()
     waiting_for_due_date = State()
+
+
+class EditHomeworkStates(StatesGroup):
+    waiting_for_new_value = State()
 
 
 def _cancel_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -175,7 +182,10 @@ async def process_hw_noop(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("hw_view_actions:"))
-async def process_hw_view_actions(callback: CallbackQuery):
+async def process_hw_view_actions(callback: CallbackQuery, state: FSMContext):
+    # Also reachable as a "back"/cancel target from the edit-field menu, so
+    # clear any leftover edit state.
+    await state.clear()
     parts = callback.data.split(":")
     hw_id = int(parts[1])
     is_archive = int(parts[2]) == 1
@@ -222,6 +232,130 @@ async def process_hw_delete(callback: CallbackQuery):
     await callback.answer("Задание успешно удалено.")
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
     await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+
+
+# ----------- EDIT HOMEWORK FSM -----------
+
+EDIT_FIELD_PROMPTS = {
+    "subject": "📚 Текущий предмет: **{value}**\n\nВведите новое название предмета:",
+    "desc": "📝 Текущее описание: _{value}_\n\nВведите новый текст задания:",
+    "date": "📅 Текущая дата сдачи: {value}\n\nВведите новую дату в формате `ДД.ММ` (например, `14.10`):",
+}
+
+
+async def _reject_missing_homework(callback: CallbackQuery, is_archive: bool):
+    await callback.answer("⚠️ Это задание не найдено (возможно, уже удалено).", show_alert=True)
+    text, kb = await format_homework_list(callback.message.chat.id, is_archive=is_archive)
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("hw_edit_menu:"))
+async def show_edit_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    parts = callback.data.split(":")
+    hw_id = int(parts[1])
+    is_archive = int(parts[2]) == 1
+
+    hw = await get_homework_by_id(callback.message.chat.id, hw_id)
+    if hw is None:
+        await _reject_missing_homework(callback, is_archive)
+        return
+
+    kb = get_homework_edit_menu_keyboard(hw_id, is_archive)
+    await safe_edit_text(
+        callback.message,
+        f"✏️ **Редактирование задания**\n\n"
+        f"**{escape_markdown(hw.subject_name)}** (до {hw.due_date.strftime('%d.%m')})\n\n"
+        "Что вы хотите изменить?",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hw_edit_field:"))
+async def initiate_edit_field(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    hw_id = int(parts[1])
+    field = parts[2]
+    is_archive = int(parts[3]) == 1
+
+    hw = await get_homework_by_id(callback.message.chat.id, hw_id)
+    if hw is None:
+        await _reject_missing_homework(callback, is_archive)
+        return
+
+    current_value = {
+        "subject": escape_markdown(hw.subject_name),
+        "desc": escape_markdown(hw.description),
+        "date": hw.due_date.strftime("%d.%m"),
+    }[field]
+
+    await state.update_data(edit_hw_id=hw_id, edit_field=field, edit_is_archive=is_archive)
+    await state.set_state(EditHomeworkStates.waiting_for_new_value)
+
+    await safe_edit_text(
+        callback.message,
+        EDIT_FIELD_PROMPTS[field].format(value=current_value),
+        reply_markup=get_cancel_keyboard(callback_data=f"hw_edit_menu:{hw_id}:{1 if is_archive else 0}"),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.message(EditHomeworkStates.waiting_for_new_value, F.text)
+async def process_edit_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    hw_id = data["edit_hw_id"]
+    field = data["edit_field"]
+    is_archive = data["edit_is_archive"]
+    text = message.text.strip()
+
+    update_kwargs = {}
+    if field == "subject":
+        if not text:
+            await message.answer("Название предмета не может быть пустым. Введите название предмета:")
+            return
+        if len(text) > MAX_SUBJECT_LEN:
+            await message.answer(f"Слишком длинное название (макс. {MAX_SUBJECT_LEN} символов). Введите короче:")
+            return
+        update_kwargs["subject_name"] = text
+    elif field == "desc":
+        if not text:
+            await message.answer("Текст задания не может быть пустым. Введите текст домашнего задания:")
+            return
+        if len(text) > MAX_DESCRIPTION_LEN:
+            await message.answer(f"Слишком длинный текст (макс. {MAX_DESCRIPTION_LEN} символов). Введите короче:")
+            return
+        update_kwargs["description"] = text
+    else:  # field == "date"
+        try:
+            day, month = map(int, text.split("."))
+            today = datetime.datetime.now(tz).date()
+            due_date = datetime.date(today.year, month, day)
+            if due_date < today:
+                due_date = datetime.date(today.year + 1, month, day)
+        except Exception:
+            await message.answer(
+                "Неверный формат даты! Укажи дату в формате `ДД.ММ` (например, `14.10`):",
+                parse_mode="Markdown"
+            )
+            return
+        update_kwargs["due_date"] = due_date
+
+    updated = await update_homework(message.chat.id, hw_id, **update_kwargs)
+    await state.clear()
+
+    if not updated:
+        await message.answer(
+            "⚠️ Это задание уже не существует (возможно, было удалено).",
+            reply_markup=get_main_menu()
+        )
+    else:
+        await message.answer("✅ Задание успешно обновлено!", reply_markup=get_main_menu())
+
+    hw_text, kb = await format_homework_list(message.chat.id, is_archive=is_archive)
+    await message.answer(hw_text, reply_markup=kb, parse_mode="Markdown")
 
 
 # ----------- ADD HOMEWORK FSM -----------
@@ -452,5 +586,6 @@ router.message.register(
         AddHomeworkStates.waiting_for_subject,
         AddHomeworkStates.waiting_for_description,
         AddHomeworkStates.waiting_for_due_date,
+        EditHomeworkStates.waiting_for_new_value,
     ),
 )

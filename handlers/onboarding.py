@@ -80,6 +80,7 @@ async def ask_for_lesson_time(message_or_callback, lesson_num: int, parse_mode="
 @router.callback_query(F.data == "ob_start")
 async def start_onboarding_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
     await state.set_state(OnboardingStates.waiting_for_lessons_count)
     await callback.message.answer(
         "1️⃣ **Шаг 1 из 3: Количество уроков**\n\n"

@@ -5,8 +5,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from database.db import (
-    get_all_chats, get_homework_due_on, get_schedule, get_lesson_slots,
-    update_last_hw_reminder_date, update_last_sch_reminder_date
+    get_all_chats, get_homework_due_on, get_overdue_homework, get_schedule,
+    get_lesson_slots, update_last_hw_reminder_date, update_last_sch_reminder_date
 )
 from keyboards.inline import DAYS_RU
 from config import TIMEZONE
@@ -25,9 +25,19 @@ async def _send_chunks(bot: Bot, chat_id: int, text: str):
         await bot.send_message(chat_id, chunk, parse_mode="Markdown")
 
 
+def _render_homework_list(homeworks) -> str:
+    lines = ""
+    for i, hw in enumerate(homeworks, 1):
+        safe_sub = escape_markdown(hw.subject_name)
+        safe_desc = escape_markdown(hw.description)
+        lines += f"{i}️⃣ **{safe_sub}**:\n   _{safe_desc}_\n\n"
+    return lines
+
+
 async def send_hw_reminder(bot: Bot, chat_id: int, tz: pytz.BaseTzInfo) -> bool:
     """
-    Sends the homework reminder for tomorrow.
+    Sends the homework reminder: homework due tomorrow, plus a separate block
+    of still-uncompleted homework whose due date has already passed.
 
     Returns ``True`` when the reminder was fully handled (either delivered, or
     there was legitimately nothing to send) so the caller may stamp the date.
@@ -38,25 +48,36 @@ async def send_hw_reminder(bot: Bot, chat_id: int, tz: pytz.BaseTzInfo) -> bool:
     tomorrow = today + datetime.timedelta(days=1)
 
     homeworks = await get_homework_due_on(chat_id, tomorrow)
+    overdue = await get_overdue_homework(chat_id, today)
 
-    if not homeworks:
-        tomorrow_schedule = await get_schedule(chat_id, tomorrow.weekday())
-        if not tomorrow_schedule:
-            # No lessons tomorrow and no homework: nothing to remind about.
-            return True
-        text = (
-            "🔔 **Напоминание о ДЗ на завтра:**\n\n"
-            "🎉 Отличные новости! На завтра нет записанных домашних заданий."
+    blocks = []
+
+    if homeworks:
+        block = (
+            f"🔔 **Домашнее задание на завтра ({tomorrow.strftime('%d.%m')}):**\n\n"
         )
+        block += _render_homework_list(homeworks)
+        blocks.append(block)
     else:
-        text = (
-            f"🔔 **Напоминание о домашнем задании на завтра "
-            f"({tomorrow.strftime('%d.%m')}):**\n\n"
-        )
-        for i, hw in enumerate(homeworks, 1):
-            safe_sub = escape_markdown(hw.subject_name)
-            safe_desc = escape_markdown(hw.description)
-            text += f"{i}️⃣ **{safe_sub}**:\n   _{safe_desc}_\n\n"
+        tomorrow_schedule = await get_schedule(chat_id, tomorrow.weekday())
+        if tomorrow_schedule:
+            blocks.append(
+                "🔔 **Домашнее задание на завтра:**\n\n"
+                "🎉 Отличные новости! На завтра нет записанных домашних заданий."
+            )
+        # No lessons tomorrow: nothing meaningful to report for this block.
+
+    if overdue:
+        block = "⚠️ **Просроченные задания:**\n\n"
+        block += _render_homework_list(overdue)
+        blocks.append(block)
+
+    if not blocks:
+        # Nothing due tomorrow, no lessons tomorrow, no overdue items: sending
+        # anything would be an empty, meaningless notification.
+        return True
+
+    text = "\n\n".join(block.rstrip("\n") for block in blocks)
 
     try:
         await _send_chunks(bot, chat_id, text)
@@ -121,7 +142,11 @@ async def check_and_send_reminders(bot: Bot):
             # HW reminder: trigger when current time >= scheduled time and not
             # yet successfully handled today.
             hw_h, hw_m = map(int, chat.hw_reminder_time.split(":"))
-            if current_hour_min >= (hw_h, hw_m) and chat.last_hw_reminder_date != today:
+            if (
+                chat.hw_reminder_enabled
+                and current_hour_min >= (hw_h, hw_m)
+                and chat.last_hw_reminder_date != today
+            ):
                 logger.info(f"Triggering HW reminder for chat {chat.chat_id}")
                 handled = await send_hw_reminder(bot, chat.chat_id, tz)
                 # Only stamp the date when the reminder was actually handled;
@@ -131,7 +156,11 @@ async def check_and_send_reminders(bot: Bot):
 
             # Schedule reminder: same trigger + success semantics.
             sch_h, sch_m = map(int, chat.schedule_reminder_time.split(":"))
-            if current_hour_min >= (sch_h, sch_m) and chat.last_sch_reminder_date != today:
+            if (
+                chat.schedule_reminder_enabled
+                and current_hour_min >= (sch_h, sch_m)
+                and chat.last_sch_reminder_date != today
+            ):
                 logger.info(f"Triggering schedule reminder for chat {chat.chat_id}")
                 handled = await send_schedule_reminder(bot, chat.chat_id, tz)
                 if handled:

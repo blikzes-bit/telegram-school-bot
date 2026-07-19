@@ -37,24 +37,43 @@ def get_homework_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 def get_homework_action_keyboard(hw_id: int, is_archive: bool = False) -> InlineKeyboardMarkup:
-    buttons = []
+    archive_flag = 1 if is_archive else 0
+    top_row = []
     if not is_archive:
-        buttons.append(InlineKeyboardButton(text="✅ Выполнено", callback_data=f"hw_complete:{hw_id}"))
+        top_row.append(InlineKeyboardButton(text="✅ Выполнено", callback_data=f"hw_complete:{hw_id}"))
     else:
-        buttons.append(InlineKeyboardButton(text="🔄 Вернуть в список", callback_data=f"hw_restore:{hw_id}"))
-        
-    buttons.append(InlineKeyboardButton(text="❌ Удалить", callback_data=f"hw_delete:{hw_id}"))
-    
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+        top_row.append(InlineKeyboardButton(text="🔄 Вернуть в список", callback_data=f"hw_restore:{hw_id}"))
+    top_row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hw_edit_menu:{hw_id}:{archive_flag}"))
 
-def get_settings_keyboard() -> InlineKeyboardMarkup:
+    bottom_row = [InlineKeyboardButton(text="❌ Удалить", callback_data=f"hw_delete:{hw_id}")]
+
+    return InlineKeyboardMarkup(inline_keyboard=[top_row, bottom_row])
+
+def get_homework_edit_menu_keyboard(hw_id: int, is_archive: bool = False) -> InlineKeyboardMarkup:
+    archive_flag = 1 if is_archive else 0
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Предмет", callback_data=f"hw_edit_field:{hw_id}:subject:{archive_flag}")],
+        [InlineKeyboardButton(text="📝 Описание", callback_data=f"hw_edit_field:{hw_id}:desc:{archive_flag}")],
+        [InlineKeyboardButton(text="📅 Дата сдачи", callback_data=f"hw_edit_field:{hw_id}:date:{archive_flag}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"hw_view_actions:{hw_id}:{archive_flag}")],
+    ])
+
+def get_settings_keyboard(hw_enabled: bool = True, schedule_enabled: bool = True) -> InlineKeyboardMarkup:
+    hw_toggle_label = "🔕 Выключить напоминание о ДЗ" if hw_enabled else "🔔 Включить напоминание о ДЗ"
+    sch_toggle_label = "🔕 Выключить напоминание о портфеле" if schedule_enabled else "🔔 Включить напоминание о портфеле"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="🔔 Напоминание о ДЗ", callback_data="set_hw_rem")
             ],
             [
+                InlineKeyboardButton(text=hw_toggle_label, callback_data="toggle_hw_rem")
+            ],
+            [
                 InlineKeyboardButton(text="🎒 Напоминание о портфеле", callback_data="set_sch_rem")
+            ],
+            [
+                InlineKeyboardButton(text=sch_toggle_label, callback_data="toggle_sch_rem")
             ],
             [
                 InlineKeyboardButton(text="⚙️ Сбросить все настройки", callback_data="set_reset_all")

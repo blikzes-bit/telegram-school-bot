@@ -11,6 +11,7 @@ from database.db import (
     save_lesson_slots, get_lesson_slots,
     save_schedule_day, get_schedule,
     add_homework, get_homework, get_homework_due_on,
+    get_overdue_homework,
     mark_homework_completed, delete_chat,
     update_last_hw_reminder_date, update_last_sch_reminder_date,
 )
@@ -67,6 +68,46 @@ async def test_homework_lifecycle(db):
     assert len(await get_homework(CHAT_ID, is_completed=True)) == 1
 
 
+async def test_overdue_homework_excludes_today_and_future(db):
+    await get_or_create_chat(CHAT_ID, "private")
+    today = datetime.date.today()
+    yesterday = today - datetime.timedelta(days=1)
+    tomorrow = today + datetime.timedelta(days=1)
+
+    await add_homework(CHAT_ID, "Mathematics", yesterday, "overdue")
+    await add_homework(CHAT_ID, "History", today, "due today")
+    await add_homework(CHAT_ID, "Physics", tomorrow, "due tomorrow")
+
+    overdue = await get_overdue_homework(CHAT_ID, today)
+    assert len(overdue) == 1
+    assert overdue[0].subject_name == "Mathematics"
+
+
+async def test_overdue_homework_excludes_completed(db):
+    await get_or_create_chat(CHAT_ID, "private")
+    today = datetime.date.today()
+    yesterday = today - datetime.timedelta(days=1)
+
+    hw = await add_homework(CHAT_ID, "Mathematics", yesterday, "overdue")
+    await mark_homework_completed(CHAT_ID, hw.id, True)
+
+    overdue = await get_overdue_homework(CHAT_ID, today)
+    assert overdue == []
+
+
+async def test_overdue_homework_filters_by_chat_id(db):
+    other_chat_id = CHAT_ID + 1
+    await get_or_create_chat(CHAT_ID, "private")
+    await get_or_create_chat(other_chat_id, "private")
+    today = datetime.date.today()
+    yesterday = today - datetime.timedelta(days=1)
+
+    await add_homework(other_chat_id, "Mathematics", yesterday, "overdue for other chat")
+
+    overdue = await get_overdue_homework(CHAT_ID, today)
+    assert overdue == []
+
+
 async def test_reminder_dates(db):
     await get_or_create_chat(CHAT_ID, "private")
     today = datetime.date.today()
@@ -76,6 +117,57 @@ async def test_reminder_dates(db):
         chat = (await session.execute(select(Chat).where(Chat.chat_id == CHAT_ID))).scalar_one()
         assert chat.last_hw_reminder_date == today
         assert chat.last_sch_reminder_date == today
+
+
+async def test_reonboarding_after_reset_does_not_violate_fk(db):
+    """
+    Regression test for the reset -> re-onboarding bug.
+
+    Flow: create a Chat, delete it (settings reset via ``execute_reset``),
+    then drive the real ``ob_start`` callback handler and the first lesson
+    time step of onboarding. Before the fix, ``start_onboarding_callback``
+    never recreated the Chat row, so ``save_lesson_slots()`` inserted a
+    LessonSlot referencing a non-existent chat_id and raised an
+    IntegrityError (FK violation).
+    """
+    from types import SimpleNamespace
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+    from handlers.onboarding import start_onboarding_callback, process_lessons_count, process_lesson_times_text
+
+    class FakeMessage:
+        def __init__(self, chat_id, text=None):
+            self.text = text
+            self.chat = SimpleNamespace(id=chat_id, type="private")
+            self.answers = []
+
+        async def answer(self, text, **kwargs):
+            self.answers.append((text, kwargs))
+            return self
+
+    class FakeCallback:
+        def __init__(self, message):
+            self.message = message
+
+        async def answer(self, *args, **kwargs):
+            pass
+
+    storage = MemoryStorage()
+    key = StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=CHAT_ID)
+    state = FSMContext(storage=storage, key=key)
+
+    await get_or_create_chat(CHAT_ID, "private")
+    await delete_chat(CHAT_ID)
+
+    callback = FakeCallback(FakeMessage(CHAT_ID))
+    await start_onboarding_callback(callback, state)
+
+    await process_lessons_count(FakeMessage(CHAT_ID, text="1"), state)
+    await process_lesson_times_text(FakeMessage(CHAT_ID, text="08:30 - 09:15"), state)
+
+    slots = await get_lesson_slots(CHAT_ID)
+    assert len(slots) == 1
 
 
 async def test_cascade_delete(db):

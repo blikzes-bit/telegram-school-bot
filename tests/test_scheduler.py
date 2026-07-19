@@ -9,7 +9,7 @@ from config import TIMEZONE
 from database.db import (
     get_or_create_chat, set_onboarded, add_homework,
     save_schedule_day, save_lesson_slots, update_chat_reminder_times,
-    get_all_chats,
+    update_chat_reminder_flags, get_all_chats, mark_homework_completed,
 )
 
 tz = pytz.timezone(TIMEZONE)
@@ -47,6 +47,95 @@ async def test_hw_reminder_no_data_is_handled(db, fake_bot):
     handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
     assert handled is True
     assert fake_bot.sent == []
+
+
+async def test_hw_reminder_only_overdue(db, fake_bot):
+    """Only overdue homework exists (nothing due tomorrow) -> overdue block only."""
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    await add_homework(CHAT_ID, "Math", yesterday, "p.10")
+
+    handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
+    assert handled is True
+    assert len(fake_bot.sent) == 1
+    text = fake_bot.sent[0][1]
+    assert "Просроченные задания" in text
+    assert "Math" in text
+    assert "Домашнее задание на завтра" not in text
+
+
+async def test_hw_reminder_tomorrow_and_overdue_blocks(db, fake_bot):
+    """Both tomorrow's homework and overdue homework exist -> both blocks present."""
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    tomorrow = today + datetime.timedelta(days=1)
+    await add_homework(CHAT_ID, "Math", tomorrow, "p.42")
+    await add_homework(CHAT_ID, "History", yesterday, "essay")
+
+    handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
+    assert handled is True
+    assert len(fake_bot.sent) == 1
+    text = fake_bot.sent[0][1]
+    assert "Домашнее задание на завтра" in text
+    assert "Math" in text
+    assert "Просроченные задания" in text
+    assert "History" in text
+    # Tomorrow's block must appear before the overdue block.
+    assert text.index("Math") < text.index("History")
+
+
+async def test_hw_reminder_completed_overdue_excluded(db, fake_bot):
+    """A completed homework past its due date must not appear as overdue."""
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    hw = await add_homework(CHAT_ID, "Math", yesterday, "p.10")
+    await mark_homework_completed(CHAT_ID, hw.id, True)
+
+    handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
+    assert handled is True
+    # Nothing due tomorrow, no schedule tomorrow, completed overdue excluded
+    # -> genuinely nothing to send.
+    assert fake_bot.sent == []
+
+
+async def test_hw_reminder_overdue_only_sent_even_without_tomorrow_schedule(db, fake_bot):
+    """Overdue items must be reported even when there's no lesson schedule for tomorrow."""
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    await add_homework(CHAT_ID, "Math", yesterday, "p.10")
+
+    handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
+    assert handled is True
+    assert len(fake_bot.sent) == 1
+
+
+async def test_hw_reminder_long_message_splits(db, fake_bot):
+    """Many overdue items push the message over the 4096-char limit."""
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    for i in range(80):
+        await add_homework(CHAT_ID, f"Subject{i}", yesterday, "x" * 60)
+
+    handled = await send_hw_reminder(fake_bot, CHAT_ID, tz)
+    assert handled is True
+    assert len(fake_bot.sent) > 1
+    for _, chunk, _ in fake_bot.sent:
+        assert len(chunk) <= 4096
+
+
+async def test_hw_reminder_overdue_telegram_error_returns_false(db, failing_bot):
+    await _onboarded_chat()
+    today = datetime.datetime.now(tz).date()
+    yesterday = today - datetime.timedelta(days=1)
+    await add_homework(CHAT_ID, "Math", yesterday, "p.10")
+
+    handled = await send_hw_reminder(failing_bot, CHAT_ID, tz)
+    assert handled is False
 
 
 async def test_schedule_reminder_no_data_is_handled(db, fake_bot):
@@ -90,6 +179,77 @@ async def test_check_does_not_stamp_on_failure(db, failing_bot):
     # Telegram failed → dates must remain unset so we retry next run.
     assert chats[CHAT_ID].last_hw_reminder_date is None
     assert chats[CHAT_ID].last_sch_reminder_date is None
+
+
+async def test_check_skips_disabled_hw_reminder(db, fake_bot, monkeypatch):
+    """A disabled HW reminder must not be sent, even when its time has passed."""
+    await _onboarded_chat()
+    await update_chat_reminder_times(CHAT_ID, hw_time="00:00", schedule_time="23:59")
+    await update_chat_reminder_flags(CHAT_ID, hw_enabled=False)
+
+    called = {"hw": False}
+
+    async def hw(*args, **kwargs):
+        called["hw"] = True
+        return True
+
+    monkeypatch.setattr(scheduler, "send_hw_reminder", hw)
+
+    await check_and_send_reminders(fake_bot)
+
+    assert called["hw"] is False
+    chats = {c.chat_id: c for c in await get_all_chats()}
+    assert chats[CHAT_ID].last_hw_reminder_date is None
+
+
+async def test_check_skips_disabled_schedule_reminder(db, fake_bot, monkeypatch):
+    """A disabled schedule ("portfolio") reminder must not be sent."""
+    await _onboarded_chat()
+    await update_chat_reminder_times(CHAT_ID, hw_time="23:59", schedule_time="00:00")
+    await update_chat_reminder_flags(CHAT_ID, schedule_enabled=False)
+
+    called = {"sch": False}
+
+    async def sch(*args, **kwargs):
+        called["sch"] = True
+        return True
+
+    monkeypatch.setattr(scheduler, "send_schedule_reminder", sch)
+
+    await check_and_send_reminders(fake_bot)
+
+    assert called["sch"] is False
+    chats = {c.chat_id: c for c in await get_all_chats()}
+    assert chats[CHAT_ID].last_sch_reminder_date is None
+
+
+async def test_check_sends_enabled_reminders_independently(db, fake_bot, monkeypatch):
+    """Disabling one reminder type must not prevent the other from being sent."""
+    await _onboarded_chat()
+    await update_chat_reminder_times(CHAT_ID, hw_time="00:00", schedule_time="00:00")
+    await update_chat_reminder_flags(CHAT_ID, hw_enabled=False, schedule_enabled=True)
+
+    called = {"hw": False, "sch": False}
+
+    async def hw(*args, **kwargs):
+        called["hw"] = True
+        return True
+
+    async def sch(*args, **kwargs):
+        called["sch"] = True
+        return True
+
+    monkeypatch.setattr(scheduler, "send_hw_reminder", hw)
+    monkeypatch.setattr(scheduler, "send_schedule_reminder", sch)
+
+    await check_and_send_reminders(fake_bot)
+
+    assert called["hw"] is False
+    assert called["sch"] is True
+    today = datetime.datetime.now(tz).date()
+    chats = {c.chat_id: c for c in await get_all_chats()}
+    assert chats[CHAT_ID].last_hw_reminder_date is None
+    assert chats[CHAT_ID].last_sch_reminder_date == today
 
 
 async def test_check_isolates_per_chat_errors(db, fake_bot, monkeypatch):

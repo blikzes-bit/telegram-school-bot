@@ -4,7 +4,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from database.db import get_or_create_chat, update_chat_reminder_times, delete_chat
+from database.db import get_or_create_chat, update_chat_reminder_times, update_chat_reminder_flags, delete_chat
 from keyboards.inline import get_settings_keyboard, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 
@@ -17,23 +17,30 @@ class SettingStates(StatesGroup):
     waiting_for_sch_time = State()
     waiting_for_reset_confirm = State()
 
+def _status_label(enabled: bool) -> str:
+    return "🟢 включено" if enabled else "🔴 отключено"
+
 async def format_settings_message(chat_id: int) -> str:
     chat = await get_or_create_chat(chat_id, "private")
     return (
         "⚙️ **Настройки оповещений**\n\n"
-        f"🔔 **Напоминание о домашнем задании**:\n"
+        f"🔔 **Напоминание о домашнем задании** ({_status_label(chat.hw_reminder_enabled)}):\n"
         f"Бот присылает список ДЗ на завтра каждый день в **{chat.hw_reminder_time}**.\n\n"
-        f"🎒 **Напоминание о портфеле**:\n"
+        f"🎒 **Напоминание о портфеле** ({_status_label(chat.schedule_reminder_enabled)}):\n"
         f"Бот присылает расписание на завтра каждый день в **{chat.schedule_reminder_time}**.\n\n"
-        f"Вы можете изменить это время с помощью кнопок ниже:"
+        f"Вы можете изменить это время или включить/отключить напоминания с помощью кнопок ниже:"
     )
+
+async def get_settings_keyboard_for_chat(chat_id: int):
+    chat = await get_or_create_chat(chat_id, "private")
+    return get_settings_keyboard(chat.hw_reminder_enabled, chat.schedule_reminder_enabled)
 
 @router.message(F.text == "⏰ Напоминания")
 @router.message(F.text == "⚙️ Настройки")
 async def show_settings(message: Message, state: FSMContext):
     await state.clear()
     text = await format_settings_message(message.chat.id)
-    kb = get_settings_keyboard()
+    kb = await get_settings_keyboard_for_chat(message.chat.id)
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data == "set_hw_rem")
@@ -75,10 +82,11 @@ async def process_hw_time(message: Message, state: FSMContext):
     await state.clear()
     
     await message.answer(f"✅ Время напоминания о ДЗ успешно изменено на **{std_time}**!", reply_markup=get_main_menu(), parse_mode="Markdown")
-    
+
     # Show settings menu again
     settings_text = await format_settings_message(message.chat.id)
-    await message.answer(settings_text, reply_markup=get_settings_keyboard(), parse_mode="Markdown")
+    kb = await get_settings_keyboard_for_chat(message.chat.id)
+    await message.answer(settings_text, reply_markup=kb, parse_mode="Markdown")
 
 @router.message(SettingStates.waiting_for_sch_time, F.text)
 async def process_sch_time(message: Message, state: FSMContext):
@@ -95,16 +103,37 @@ async def process_sch_time(message: Message, state: FSMContext):
     await state.clear()
     
     await message.answer(f"✅ Время напоминания о портфеле успешно изменено на **{std_time}**!", reply_markup=get_main_menu(), parse_mode="Markdown")
-    
+
     # Show settings menu again
     settings_text = await format_settings_message(message.chat.id)
-    await message.answer(settings_text, reply_markup=get_settings_keyboard(), parse_mode="Markdown")
+    kb = await get_settings_keyboard_for_chat(message.chat.id)
+    await message.answer(settings_text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data == "set_cancel")
 async def cancel_settings_edit(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     text = await format_settings_message(callback.message.chat.id)
-    kb = get_settings_keyboard()
+    kb = await get_settings_keyboard_for_chat(callback.message.chat.id)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "toggle_hw_rem")
+async def toggle_hw_reminder(callback: CallbackQuery, state: FSMContext):
+    chat = await get_or_create_chat(callback.message.chat.id, "private")
+    await update_chat_reminder_flags(chat.chat_id, hw_enabled=not chat.hw_reminder_enabled)
+
+    text = await format_settings_message(callback.message.chat.id)
+    kb = await get_settings_keyboard_for_chat(callback.message.chat.id)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "toggle_sch_rem")
+async def toggle_sch_reminder(callback: CallbackQuery, state: FSMContext):
+    chat = await get_or_create_chat(callback.message.chat.id, "private")
+    await update_chat_reminder_flags(chat.chat_id, schedule_enabled=not chat.schedule_reminder_enabled)
+
+    text = await format_settings_message(callback.message.chat.id)
+    kb = await get_settings_keyboard_for_chat(callback.message.chat.id)
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 

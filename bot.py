@@ -9,7 +9,7 @@ from database.db import init_db
 from services.scheduler import setup_scheduler
 
 # Import routers
-from handlers import common, onboarding, schedule, homework, settings
+from handlers import common, onboarding, schedule, homework, settings, today
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +35,7 @@ async def main():
     # Onboarding has state handlers, common has fallback start commands.
     dp.include_router(common.router)
     dp.include_router(onboarding.router)
+    dp.include_router(today.router)
     dp.include_router(schedule.router)
     dp.include_router(homework.router)
     dp.include_router(settings.router)

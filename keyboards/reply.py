@@ -6,6 +6,9 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     """
     keyboard = [
         [
+            KeyboardButton(text="📚 Сегодня")
+        ],
+        [
             KeyboardButton(text="📅 Расписание"),
             KeyboardButton(text="📝 Домашнее задание")
         ],
