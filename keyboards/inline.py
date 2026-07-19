@@ -36,26 +36,39 @@ def get_homework_menu_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-def get_homework_action_keyboard(hw_id: int, is_archive: bool = False) -> InlineKeyboardMarkup:
+def get_homework_action_keyboard(hw_id: int, is_archive: bool = False, page: int = 0) -> InlineKeyboardMarkup:
     archive_flag = 1 if is_archive else 0
     top_row = []
     if not is_archive:
-        top_row.append(InlineKeyboardButton(text="✅ Выполнено", callback_data=f"hw_complete:{hw_id}"))
+        top_row.append(InlineKeyboardButton(text="✅ Выполнено", callback_data=f"hw_complete:{hw_id}:{page}"))
     else:
-        top_row.append(InlineKeyboardButton(text="🔄 Вернуть в список", callback_data=f"hw_restore:{hw_id}"))
-    top_row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hw_edit_menu:{hw_id}:{archive_flag}"))
+        top_row.append(InlineKeyboardButton(text="🔄 Вернуть в список", callback_data=f"hw_restore:{hw_id}:{page}"))
+    top_row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hw_edit_menu:{hw_id}:{archive_flag}:{page}"))
 
-    bottom_row = [InlineKeyboardButton(text="❌ Удалить", callback_data=f"hw_delete:{hw_id}")]
+    bottom_row = [InlineKeyboardButton(text="❌ Удалить", callback_data=f"hw_delete_ask:{hw_id}:{archive_flag}:{page}")]
+    back_row = [InlineKeyboardButton(
+        text="🔙 Назад к списку",
+        callback_data=f"hw_page:{'arc' if is_archive else 'act'}:{page}",
+    )]
 
-    return InlineKeyboardMarkup(inline_keyboard=[top_row, bottom_row])
+    return InlineKeyboardMarkup(inline_keyboard=[top_row, bottom_row, back_row])
 
-def get_homework_edit_menu_keyboard(hw_id: int, is_archive: bool = False) -> InlineKeyboardMarkup:
+def get_homework_delete_confirm_keyboard(hw_id: int, is_archive: bool, page: int) -> InlineKeyboardMarkup:
     archive_flag = 1 if is_archive else 0
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📚 Предмет", callback_data=f"hw_edit_field:{hw_id}:subject:{archive_flag}")],
-        [InlineKeyboardButton(text="📝 Описание", callback_data=f"hw_edit_field:{hw_id}:desc:{archive_flag}")],
-        [InlineKeyboardButton(text="📅 Дата сдачи", callback_data=f"hw_edit_field:{hw_id}:date:{archive_flag}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"hw_view_actions:{hw_id}:{archive_flag}")],
+        [
+            InlineKeyboardButton(text="⚠️ Да, удалить", callback_data=f"hw_delete_confirm:{hw_id}:{archive_flag}:{page}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"hw_view_actions:{hw_id}:{archive_flag}:{page}"),
+        ]
+    ])
+
+def get_homework_edit_menu_keyboard(hw_id: int, is_archive: bool = False, page: int = 0) -> InlineKeyboardMarkup:
+    archive_flag = 1 if is_archive else 0
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Предмет", callback_data=f"hw_edit_field:{hw_id}:subject:{archive_flag}:{page}")],
+        [InlineKeyboardButton(text="📝 Описание", callback_data=f"hw_edit_field:{hw_id}:desc:{archive_flag}:{page}")],
+        [InlineKeyboardButton(text="📅 Дата сдачи", callback_data=f"hw_edit_field:{hw_id}:date:{archive_flag}:{page}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"hw_view_actions:{hw_id}:{archive_flag}:{page}")],
     ])
 
 def get_settings_keyboard(hw_enabled: bool = True, schedule_enabled: bool = True) -> InlineKeyboardMarkup:

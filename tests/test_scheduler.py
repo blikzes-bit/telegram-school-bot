@@ -259,7 +259,7 @@ async def test_check_isolates_per_chat_errors(db, fake_bot, monkeypatch):
     await update_chat_reminder_times(1001, hw_time="00:00", schedule_time="23:59")
     await update_chat_reminder_times(1002, hw_time="00:00", schedule_time="23:59")
 
-    async def hw(bot, chat_id, tz_):
+    async def hw(bot, chat_id, tz_, **kwargs):
         if chat_id == 1001:
             raise RuntimeError("boom for 1001")
         return True

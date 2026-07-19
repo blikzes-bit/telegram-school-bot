@@ -35,20 +35,43 @@ class FakeTelegramError(TelegramAPIError):
         self.method = None
 
 
+class FakeChatMember:
+    def __init__(self, status: str):
+        self.status = status
+
+
 class FakeBot:
     """
     Minimal stand-in for aiogram's Bot. Records every send_message call and can
     be told to fail like Telegram would on a delivery error.
+
+    ``fail`` (bool) keeps the original "always raise a generic TelegramAPIError"
+    behavior. ``fail_sequence`` overrides it with a list consumed one entry per
+    ``send_message`` call — each entry is either an exception instance to raise
+    or ``None`` to succeed — for tests that need a specific failure pattern
+    (e.g. "chunk 2 raises TelegramRetryAfter, then everything succeeds").
+    Admin checks are driven by ``admins``: a set of user_ids treated as chat
+    administrators (everyone else is a regular member).
     """
 
-    def __init__(self, fail: bool = False):
+    def __init__(self, fail: bool = False, fail_sequence=None, admins=None):
         self.fail = fail
+        self.fail_sequence = list(fail_sequence) if fail_sequence else None
+        self.admins = admins or set()
         self.sent = []  # list of (chat_id, text, kwargs)
 
     async def send_message(self, chat_id, text, **kwargs):
-        if self.fail:
+        if self.fail_sequence is not None and self.fail_sequence:
+            outcome = self.fail_sequence.pop(0)
+            if outcome is not None:
+                raise outcome
+        elif self.fail:
             raise FakeTelegramError()
         self.sent.append((chat_id, text, kwargs))
+
+    async def get_chat_member(self, chat_id, user_id):
+        status = "administrator" if user_id in self.admins else "member"
+        return FakeChatMember(status)
 
 
 @pytest.fixture

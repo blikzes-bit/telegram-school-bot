@@ -124,17 +124,21 @@ async def test_reonboarding_after_reset_does_not_violate_fk(db):
     Regression test for the reset -> re-onboarding bug.
 
     Flow: create a Chat, delete it (settings reset via ``execute_reset``),
-    then drive the real ``ob_start`` callback handler and the first lesson
-    time step of onboarding. Before the fix, ``start_onboarding_callback``
-    never recreated the Chat row, so ``save_lesson_slots()`` inserted a
+    then drive the real onboarding handlers all the way through completion.
+    Before the fix, ``start_onboarding_callback`` never recreated the Chat
+    row, so persisting the collected slots at the end would have inserted a
     LessonSlot referencing a non-existent chat_id and raised an
-    IntegrityError (FK violation).
+    IntegrityError (FK violation). Lesson slots/schedule are only written once
+    at the very end (see finalize_onboarding), so this drives the full flow.
     """
     from types import SimpleNamespace
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.storage.base import StorageKey
     from aiogram.fsm.storage.memory import MemoryStorage
-    from handlers.onboarding import start_onboarding_callback, process_lessons_count, process_lesson_times_text
+    from handlers.onboarding import (
+        start_onboarding_callback, process_lessons_count, process_lesson_times_text,
+        process_schedule_subjects, process_saturday_decision,
+    )
 
     class FakeMessage:
         def __init__(self, chat_id, text=None):
@@ -149,6 +153,8 @@ async def test_reonboarding_after_reset_does_not_violate_fk(db):
     class FakeCallback:
         def __init__(self, message):
             self.message = message
+            self.bot = None
+            self.from_user = SimpleNamespace(id=CHAT_ID)
 
         async def answer(self, *args, **kwargs):
             pass
@@ -165,6 +171,12 @@ async def test_reonboarding_after_reset_does_not_violate_fk(db):
 
     await process_lessons_count(FakeMessage(CHAT_ID, text="1"), state)
     await process_lesson_times_text(FakeMessage(CHAT_ID, text="08:30 - 09:15"), state)
+
+    # Monday through Friday, one lesson each.
+    for _ in range(5):
+        await process_schedule_subjects(FakeMessage(CHAT_ID, text="Math"), state)
+    # Decline Saturday -> triggers _finalize_onboarding (single atomic write).
+    await process_saturday_decision(FakeMessage(CHAT_ID, text="нет"), state)
 
     slots = await get_lesson_slots(CHAT_ID)
     assert len(slots) == 1

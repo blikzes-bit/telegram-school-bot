@@ -64,7 +64,7 @@ async def _open_field(hw_id, field, chat_id=CHAT_ID, is_archive=0):
     """Drives hw_edit_menu -> hw_edit_field so the FSM state is populated."""
     state = _make_state(chat_id)
     msg = FakeMessage(chat_id)
-    cb = FakeCallback(msg, f"hw_edit_field:{hw_id}:{field}:{is_archive}")
+    cb = FakeCallback(msg, f"hw_edit_field:{hw_id}:{field}:{is_archive}:0")
     await initiate_edit_field(cb, state)
     return state, msg, cb
 
@@ -178,7 +178,7 @@ async def test_foreign_chat_id_cannot_open_edit_menu(db):
 
     state = _make_state(OTHER_CHAT_ID)
     msg = FakeMessage(OTHER_CHAT_ID)
-    cb = FakeCallback(msg, f"hw_edit_menu:{hw.id}:0")
+    cb = FakeCallback(msg, f"hw_edit_menu:{hw.id}:0:0")
     await show_edit_menu(cb, state)
 
     assert cb.alerts, "should alert that homework was not found for this chat"
@@ -196,7 +196,7 @@ async def test_foreign_chat_id_edit_value_is_noop(db):
     hw = await add_homework(CHAT_ID, "Math", datetime.date(2026, 1, 10), "p.1")
 
     state = _make_state(OTHER_CHAT_ID)
-    await state.update_data(edit_hw_id=hw.id, edit_field="subject", edit_is_archive=0)
+    await state.update_data(edit_hw_id=hw.id, edit_field="subject", edit_is_archive=0, edit_page=0)
     await state.set_state(EditHomeworkStates.waiting_for_new_value)
 
     value_msg = FakeMessage(OTHER_CHAT_ID, text="Hijacked")
@@ -217,7 +217,7 @@ async def test_cancel_clears_state(db):
     # The cancel button's callback_data points back to hw_edit_menu, which
     # must clear the FSM state.
     cancel_msg = FakeMessage(CHAT_ID)
-    cancel_cb = FakeCallback(cancel_msg, f"hw_edit_menu:{hw.id}:0")
+    cancel_cb = FakeCallback(cancel_msg, f"hw_edit_menu:{hw.id}:0:0")
     await show_edit_menu(cancel_cb, state)
 
     assert await state.get_state() is None
@@ -231,7 +231,7 @@ async def test_edit_menu_for_deleted_homework(db):
     await get_or_create_chat(CHAT_ID, "private")
     state = _make_state()
     msg = FakeMessage(CHAT_ID)
-    cb = FakeCallback(msg, "hw_edit_menu:999999:0")
+    cb = FakeCallback(msg, "hw_edit_menu:999999:0:0")
     await show_edit_menu(cb, state)
 
     assert cb.alerts
@@ -242,7 +242,7 @@ async def test_edit_field_for_deleted_homework(db):
     await get_or_create_chat(CHAT_ID, "private")
     state = _make_state()
     msg = FakeMessage(CHAT_ID)
-    cb = FakeCallback(msg, "hw_edit_field:999999:subject:0")
+    cb = FakeCallback(msg, "hw_edit_field:999999:subject:0:0")
     await initiate_edit_field(cb, state)
 
     assert cb.alerts

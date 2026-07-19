@@ -10,5 +10,9 @@ __pycache__/
 *.pyd
 .venv
 venv/
-test_db_flow.py
 README.md
+tests/
+.pytest_cache/
+.idea/
+requirements-dev.txt
+mypy.ini

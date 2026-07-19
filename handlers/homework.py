@@ -14,11 +14,14 @@ from database.db import (
     get_homework, add_homework, mark_homework_completed, delete_homework, get_schedule,
     get_homework_by_id, update_homework,
 )
-from keyboards.inline import get_homework_action_keyboard, get_homework_edit_menu_keyboard, get_cancel_keyboard, DAYS_RU
+from keyboards.inline import (
+    get_homework_action_keyboard, get_homework_edit_menu_keyboard,
+    get_homework_delete_confirm_keyboard, get_cancel_keyboard, DAYS_RU,
+)
 from keyboards.reply import get_main_menu
 from config import TIMEZONE
 from utils import (
-    escape_markdown, safe_edit_text,
+    html_escape, safe_edit_text, safe_callback_ints, next_occurrence,
     SAFE_PAGE_LIMIT, HW_MAX_PER_PAGE, MAX_SUBJECT_LEN, MAX_DESCRIPTION_LEN,
 )
 
@@ -26,6 +29,7 @@ router = Router()
 tz = pytz.timezone(TIMEZONE)
 
 NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь сообщение текстом (или нажми «❌ Отмена»)."
+STALE_BUTTON_TEXT = "⚠️ Эта кнопка устарела, открой список заново."
 
 
 class AddHomeworkStates(StatesGroup):
@@ -48,7 +52,7 @@ def _cancel_reply_keyboard() -> ReplyKeyboardMarkup:
 async def format_homework_list(chat_id: int, is_archive: bool = False, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     homework_list = await get_homework(chat_id, is_completed=is_archive)
 
-    title = "🗄️ **Архив выполненных заданий**" if is_archive else "📝 **Актуальные домашние задания**"
+    title = "🗄️ <b>Архив выполненных заданий</b>" if is_archive else "📝 <b>Актуальные домашние задания</b>"
     scope = "arc" if is_archive else "act"
 
     def footer_buttons() -> List[List[InlineKeyboardButton]]:
@@ -88,9 +92,9 @@ async def format_homework_list(chat_id: int, is_archive: bool = False, page: int
         elif days_left < 0:
             due_suffix = " (⚠️ Просрочено!)"
 
-        safe_subject = escape_markdown(hw.subject_name)
-        safe_desc = escape_markdown(hw.description)
-        block = f"**{safe_subject}** (до {due_str}{due_suffix}):\n   _{safe_desc}_"
+        safe_subject = html_escape(hw.subject_name)
+        safe_desc = html_escape(hw.description)
+        block = f"<b>{safe_subject}</b> (до {due_str}{due_suffix}):\n   <i>{safe_desc}</i>"
         rendered.append((hw, block, due_str))
 
     # --- Greedy pagination so each page fits well within Telegram's limit ---
@@ -124,7 +128,7 @@ async def format_homework_list(chat_id: int, is_archive: bool = False, page: int
         buttons.append([
             InlineKeyboardButton(
                 text=f"{'📁' if is_archive else '📌'} {hw.subject_name} ({due_str})",
-                callback_data=f"hw_view_actions:{hw.id}:{1 if is_archive else 0}"
+                callback_data=f"hw_view_actions:{hw.id}:{1 if is_archive else 0}:{page}"
             )
         ])
 
@@ -147,32 +151,41 @@ async def format_homework_list(chat_id: int, is_archive: bool = False, page: int
 async def show_homework(message: Message, state: FSMContext):
     await state.clear()
     text, kb = await format_homework_list(message.chat.id, is_archive=False)
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "hw_list_active")
 async def process_hw_list_active(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data == "hw_archive")
 async def process_hw_archive(callback: CallbackQuery):
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=True)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("hw_page:"))
 async def process_hw_page(callback: CallbackQuery):
     parts = callback.data.split(":")
-    scope = parts[1]
-    page = int(parts[2])
-    is_archive = scope == "arc"
+    if len(parts) < 3 or parts[1] not in ("act", "arc"):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    page = None
+    try:
+        page = int(parts[2])
+    except ValueError:
+        pass
+    if page is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    is_archive = parts[1] == "arc"
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=is_archive, page=page)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -186,89 +199,136 @@ async def process_hw_view_actions(callback: CallbackQuery, state: FSMContext):
     # Also reachable as a "back"/cancel target from the edit-field menu, so
     # clear any leftover edit state.
     await state.clear()
-    parts = callback.data.split(":")
-    hw_id = int(parts[1])
-    is_archive = int(parts[2]) == 1
+    ints = safe_callback_ints(callback.data, 1, 2, 3)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, archive_flag, page = ints
+    is_archive = archive_flag == 1
 
-    kb = get_homework_action_keyboard(hw_id, is_archive)
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="🔙 Назад к списку",
-            callback_data="hw_archive" if is_archive else "hw_list_active"
-        )
-    ])
+    kb = get_homework_action_keyboard(hw_id, is_archive, page)
 
     await safe_edit_text(
         callback.message,
-        "⚙️ **Выберите действие для этого домашнего задания:**",
+        "⚙️ <b>Выберите действие для этого домашнего задания:</b>",
         reply_markup=kb,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("hw_complete:"))
 async def process_hw_complete(callback: CallbackQuery):
-    hw_id = int(callback.data.split(":")[1])
-    await mark_homework_completed(callback.message.chat.id, hw_id, is_completed=True)
-    await callback.answer("Задание отмечено как выполненное! 🎉")
-    text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    ints = safe_callback_ints(callback.data, 1, 2)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, page = ints
+    ok = await mark_homework_completed(callback.message.chat.id, hw_id, is_completed=True)
+    if not ok:
+        await callback.answer("⚠️ Это задание уже не существует.", show_alert=True)
+    else:
+        await callback.answer("Задание отмечено как выполненное! 🎉")
+    text, kb = await format_homework_list(callback.message.chat.id, is_archive=False, page=page)
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("hw_restore:"))
 async def process_hw_restore(callback: CallbackQuery):
-    hw_id = int(callback.data.split(":")[1])
-    await mark_homework_completed(callback.message.chat.id, hw_id, is_completed=False)
-    await callback.answer("Задание возвращено в активный список.")
-    text, kb = await format_homework_list(callback.message.chat.id, is_archive=True)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    ints = safe_callback_ints(callback.data, 1, 2)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, page = ints
+    ok = await mark_homework_completed(callback.message.chat.id, hw_id, is_completed=False)
+    if not ok:
+        await callback.answer("⚠️ Это задание уже не существует.", show_alert=True)
+    else:
+        await callback.answer("Задание возвращено в активный список.")
+    text, kb = await format_homework_list(callback.message.chat.id, is_archive=True, page=page)
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.callback_query(F.data.startswith("hw_delete:"))
-async def process_hw_delete(callback: CallbackQuery):
-    hw_id = int(callback.data.split(":")[1])
-    await delete_homework(callback.message.chat.id, hw_id)
-    await callback.answer("Задание успешно удалено.")
-    text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+@router.callback_query(F.data.startswith("hw_delete_ask:"))
+async def process_hw_delete_ask(callback: CallbackQuery):
+    ints = safe_callback_ints(callback.data, 1, 2, 3)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, archive_flag, page = ints
+    is_archive = archive_flag == 1
+
+    hw = await get_homework_by_id(callback.message.chat.id, hw_id)
+    if hw is None:
+        await _reject_missing_homework(callback, is_archive, page)
+        return
+
+    await safe_edit_text(
+        callback.message,
+        f"❗ Удалить задание «{html_escape(hw.subject_name)}» безвозвратно?",
+        reply_markup=get_homework_delete_confirm_keyboard(hw_id, is_archive, page),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hw_delete_confirm:"))
+async def process_hw_delete_confirm(callback: CallbackQuery):
+    ints = safe_callback_ints(callback.data, 1, 2, 3)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, archive_flag, page = ints
+    is_archive = archive_flag == 1
+
+    ok = await delete_homework(callback.message.chat.id, hw_id)
+    if not ok:
+        await callback.answer("⚠️ Это задание уже не существует.", show_alert=True)
+    else:
+        await callback.answer("Задание успешно удалено.")
+    # Returns to the SAME list (archive stays archive, active stays active).
+    text, kb = await format_homework_list(callback.message.chat.id, is_archive=is_archive, page=page)
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
 
 
 # ----------- EDIT HOMEWORK FSM -----------
 
 EDIT_FIELD_PROMPTS = {
-    "subject": "📚 Текущий предмет: **{value}**\n\nВведите новое название предмета:",
-    "desc": "📝 Текущее описание: _{value}_\n\nВведите новый текст задания:",
-    "date": "📅 Текущая дата сдачи: {value}\n\nВведите новую дату в формате `ДД.ММ` (например, `14.10`):",
+    "subject": "📚 Текущий предмет: <b>{value}</b>\n\nВведите новое название предмета:",
+    "desc": "📝 Текущее описание: <i>{value}</i>\n\nВведите новый текст задания:",
+    "date": "📅 Текущая дата сдачи: {value}\n\nВведите новую дату в формате <code>ДД.ММ</code> (например, <code>14.10</code>):",
 }
 
 
-async def _reject_missing_homework(callback: CallbackQuery, is_archive: bool):
+async def _reject_missing_homework(callback: CallbackQuery, is_archive: bool, page: int = 0):
     await callback.answer("⚠️ Это задание не найдено (возможно, уже удалено).", show_alert=True)
-    text, kb = await format_homework_list(callback.message.chat.id, is_archive=is_archive)
-    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="Markdown")
+    text, kb = await format_homework_list(callback.message.chat.id, is_archive=is_archive, page=page)
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("hw_edit_menu:"))
 async def show_edit_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    parts = callback.data.split(":")
-    hw_id = int(parts[1])
-    is_archive = int(parts[2]) == 1
+    ints = safe_callback_ints(callback.data, 1, 2, 3)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, archive_flag, page = ints
+    is_archive = archive_flag == 1
 
     hw = await get_homework_by_id(callback.message.chat.id, hw_id)
     if hw is None:
-        await _reject_missing_homework(callback, is_archive)
+        await _reject_missing_homework(callback, is_archive, page)
         return
 
-    kb = get_homework_edit_menu_keyboard(hw_id, is_archive)
+    kb = get_homework_edit_menu_keyboard(hw_id, is_archive, page)
     await safe_edit_text(
         callback.message,
-        f"✏️ **Редактирование задания**\n\n"
-        f"**{escape_markdown(hw.subject_name)}** (до {hw.due_date.strftime('%d.%m')})\n\n"
+        f"✏️ <b>Редактирование задания</b>\n\n"
+        f"<b>{html_escape(hw.subject_name)}</b> (до {hw.due_date.strftime('%d.%m')})\n\n"
         "Что вы хотите изменить?",
         reply_markup=kb,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -276,29 +336,33 @@ async def show_edit_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("hw_edit_field:"))
 async def initiate_edit_field(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
-    hw_id = int(parts[1])
+    ints = safe_callback_ints(callback.data, 1, 3, 4)
+    if ints is None or len(parts) < 5 or parts[2] not in ("subject", "desc", "date"):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    hw_id, archive_flag, page = ints
     field = parts[2]
-    is_archive = int(parts[3]) == 1
+    is_archive = archive_flag == 1
 
     hw = await get_homework_by_id(callback.message.chat.id, hw_id)
     if hw is None:
-        await _reject_missing_homework(callback, is_archive)
+        await _reject_missing_homework(callback, is_archive, page)
         return
 
     current_value = {
-        "subject": escape_markdown(hw.subject_name),
-        "desc": escape_markdown(hw.description),
+        "subject": html_escape(hw.subject_name),
+        "desc": html_escape(hw.description),
         "date": hw.due_date.strftime("%d.%m"),
     }[field]
 
-    await state.update_data(edit_hw_id=hw_id, edit_field=field, edit_is_archive=is_archive)
+    await state.update_data(edit_hw_id=hw_id, edit_field=field, edit_is_archive=is_archive, edit_page=page)
     await state.set_state(EditHomeworkStates.waiting_for_new_value)
 
     await safe_edit_text(
         callback.message,
         EDIT_FIELD_PROMPTS[field].format(value=current_value),
-        reply_markup=get_cancel_keyboard(callback_data=f"hw_edit_menu:{hw_id}:{1 if is_archive else 0}"),
-        parse_mode="Markdown"
+        reply_markup=get_cancel_keyboard(callback_data=f"hw_edit_menu:{hw_id}:{1 if is_archive else 0}:{page}"),
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -309,6 +373,7 @@ async def process_edit_value(message: Message, state: FSMContext):
     hw_id = data["edit_hw_id"]
     field = data["edit_field"]
     is_archive = data["edit_is_archive"]
+    page = data.get("edit_page", 0)
     text = message.text.strip()
 
     update_kwargs = {}
@@ -332,13 +397,11 @@ async def process_edit_value(message: Message, state: FSMContext):
         try:
             day, month = map(int, text.split("."))
             today = datetime.datetime.now(tz).date()
-            due_date = datetime.date(today.year, month, day)
-            if due_date < today:
-                due_date = datetime.date(today.year + 1, month, day)
-        except Exception:
+            due_date = next_occurrence(month, day, today)
+        except ValueError:
             await message.answer(
-                "Неверный формат даты! Укажи дату в формате `ДД.ММ` (например, `14.10`):",
-                parse_mode="Markdown"
+                "Неверный формат даты! Укажи дату в формате <code>ДД.ММ</code> (например, <code>14.10</code>):",
+                parse_mode="HTML"
             )
             return
         update_kwargs["due_date"] = due_date
@@ -354,8 +417,8 @@ async def process_edit_value(message: Message, state: FSMContext):
     else:
         await message.answer("✅ Задание успешно обновлено!", reply_markup=get_main_menu())
 
-    hw_text, kb = await format_homework_list(message.chat.id, is_archive=is_archive)
-    await message.answer(hw_text, reply_markup=kb, parse_mode="Markdown")
+    hw_text, kb = await format_homework_list(message.chat.id, is_archive=is_archive, page=page)
+    await message.answer(hw_text, reply_markup=kb, parse_mode="HTML")
 
 
 # ----------- ADD HOMEWORK FSM -----------
@@ -391,21 +454,25 @@ async def initiate_add_homework(callback: CallbackQuery, state: FSMContext):
 
     await safe_edit_text(
         callback.message,
-        "➕ **Добавление домашнего задания**\n\n"
+        "➕ <b>Добавление домашнего задания</b>\n\n"
         "Выберите предмет из списка ниже или введите название предмета вручную:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
 
 @router.callback_query(AddHomeworkStates.waiting_for_subject, F.data.startswith("hwa_sub:"))
 async def process_subject_callback(callback: CallbackQuery, state: FSMContext):
-    idx = int(callback.data.split(":")[1])
+    ints = safe_callback_ints(callback.data, 1)
+    if ints is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    idx = ints[0]
     data = await state.get_data()
     subjects = data.get("hw_subjects", [])
 
-    if idx >= len(subjects):
+    if idx < 0 or idx >= len(subjects):
         await callback.answer("Предмет не найден.", show_alert=True)
         return
 
@@ -415,9 +482,9 @@ async def process_subject_callback(callback: CallbackQuery, state: FSMContext):
 
     await safe_edit_text(
         callback.message,
-        f"📝 Предмет: **{escape_markdown(subject)}**\n\nВведите текст домашнего задания:",
+        f"📝 Предмет: <b>{html_escape(subject)}</b>\n\nВведите текст домашнего задания:",
         reply_markup=get_cancel_keyboard(callback_data="hw_list_active"),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -441,9 +508,9 @@ async def process_subject_text(message: Message, state: FSMContext):
     await state.set_state(AddHomeworkStates.waiting_for_description)
 
     await message.answer(
-        f"📝 Предмет: **{escape_markdown(subject)}**\n\nВведите текст домашнего задания:",
+        f"📝 Предмет: <b>{html_escape(subject)}</b>\n\nВведите текст домашнего задания:",
         reply_markup=_cancel_reply_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -500,21 +567,35 @@ async def process_description(message: Message, state: FSMContext):
     buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="hw_list_active")])
     await state.set_state(AddHomeworkStates.waiting_for_due_date)
 
-    safe_sub = escape_markdown(subject)
-    safe_desc = escape_markdown(description)
+    safe_sub = html_escape(subject)
+    safe_desc = html_escape(description)
     await message.answer(
-        f"📝 Предмет: **{safe_sub}**\n"
-        f"📋 Задание: _{safe_desc}_\n\n"
-        "Выбери дату сдачи или введи вручную в формате `ДД.ММ` (например, `14.10`):",
+        f"📝 Предмет: <b>{safe_sub}</b>\n"
+        f"📋 Задание: <i>{safe_desc}</i>\n\n"
+        "Выбери дату сдачи или введи вручную в формате <code>ДД.ММ</code> (например, <code>14.10</code>):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
 @router.callback_query(AddHomeworkStates.waiting_for_due_date, F.data.startswith("hwa_date:"))
 async def process_due_date_callback(callback: CallbackQuery, state: FSMContext):
-    date_str = callback.data.split(":")[1]
-    due_date = datetime.date.fromisoformat(date_str)
+    date_str = callback.data.split(":", 1)[1]
+    try:
+        due_date = datetime.date.fromisoformat(date_str)
+    except ValueError:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+
+    today = datetime.datetime.now(tz).date()
+    if due_date < today:
+        # A stale "Завтра"/"Послезавтра" button pressed after midnight would
+        # otherwise silently create an already-overdue homework entry.
+        await callback.answer(
+            "⚠️ Эта дата уже в прошлом. Выбери дату заново или введи вручную.",
+            show_alert=True,
+        )
+        return
 
     data = await state.get_data()
     subject = data["hw_subject"]
@@ -523,15 +604,18 @@ async def process_due_date_callback(callback: CallbackQuery, state: FSMContext):
     await add_homework(callback.message.chat.id, subject, due_date, description)
     await state.clear()
 
-    safe_sub = escape_markdown(subject)
-    await callback.message.delete()
+    safe_sub = html_escape(subject)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await callback.message.answer(
-        f"✅ Домашнее задание по предмету **{safe_sub}** на {due_date.strftime('%d.%m')} сохранено!",
+        f"✅ Домашнее задание по предмету <b>{safe_sub}</b> на {due_date.strftime('%d.%m')} сохранено!",
         reply_markup=get_main_menu(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
-    await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -546,15 +630,11 @@ async def process_due_date_text(message: Message, state: FSMContext):
     try:
         day, month = map(int, text.split("."))
         today = datetime.datetime.now(tz).date()
-        year = today.year
-        due_date = datetime.date(year, month, day)
-        # Fix #5: always push to next year if date is already in the past
-        if due_date < today:
-            due_date = datetime.date(year + 1, month, day)
-    except Exception:
+        due_date = next_occurrence(month, day, today)
+    except ValueError:
         await message.answer(
-            "Неверный формат даты! Укажи дату в формате `ДД.ММ` (например, `14.10`):",
-            parse_mode="Markdown"
+            "Неверный формат даты! Укажи дату в формате <code>ДД.ММ</code> (например, <code>14.10</code>):",
+            parse_mode="HTML"
         )
         return
 
@@ -565,14 +645,14 @@ async def process_due_date_text(message: Message, state: FSMContext):
     await add_homework(message.chat.id, subject, due_date, description)
     await state.clear()
 
-    safe_sub = escape_markdown(subject)
+    safe_sub = html_escape(subject)
     await message.answer(
-        f"✅ Домашнее задание по предмету **{safe_sub}** на {due_date.strftime('%d.%m')} сохранено!",
+        f"✅ Домашнее задание по предмету <b>{safe_sub}</b> на {due_date.strftime('%d.%m')} сохранено!",
         reply_markup=get_main_menu(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     hw_text, kb = await format_homework_list(message.chat.id, is_archive=False)
-    await message.answer(hw_text, reply_markup=kb, parse_mode="Markdown")
+    await message.answer(hw_text, reply_markup=kb, parse_mode="HTML")
 
 
 # --- Fallback: non-text content while a homework FSM step expects text ---

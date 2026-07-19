@@ -1,5 +1,7 @@
+import datetime
+import html
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from aiogram.exceptions import TelegramBadRequest
 
@@ -20,15 +22,14 @@ MAX_SUBJECT_LEN = 100
 MAX_DESCRIPTION_LEN = 1000
 
 
-def escape_markdown(text: str) -> str:
+def html_escape(text: str) -> str:
     """
-    Escapes special Markdown V1 characters in user-provided text
-    to prevent Telegram parser crashes.
-    Characters escaped: * _ ` [
+    Escapes ``&``, ``<`` and ``>`` in user-provided text so it can be safely
+    interpolated into a message sent with ``parse_mode="HTML"`` — Telegram's
+    HTML parse mode does not tolerate unescaped entities the way legacy
+    Markdown silently ignored most punctuation.
     """
-    for ch in ("*", "_", "`", "["):
-        text = text.replace(ch, f"\\{ch}")
-    return text
+    return html.escape(text, quote=False)
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> List[str]:
@@ -150,3 +151,56 @@ def validate_against_previous(start: str, prev_end: Optional[str]) -> None:
         raise ValueError(
             f"Урок не может начинаться ({start}) раньше конца предыдущего ({prev_end})."
         )
+
+
+def next_occurrence(month: int, day: int, today: datetime.date, max_years_ahead: int = 8) -> datetime.date:
+    """
+    Finds the next future-or-today occurrence of a ``(month, day)`` date,
+    starting from ``today.year`` and advancing one year at a time.
+
+    Handles February 29th correctly: if ``today.year`` (or ``today.year + 1``,
+    etc.) is not a leap year, ``datetime.date(year, 2, 29)`` raises
+    ``ValueError`` — that year is simply skipped rather than treated as an
+    invalid input, so the next actual leap year is returned instead of
+    raising a spurious "invalid date" error.
+    """
+    for offset in range(max_years_ahead + 1):
+        year = today.year + offset
+        try:
+            candidate = datetime.date(year, month, day)
+        except ValueError:
+            continue  # e.g. Feb 29 in a non-leap year - try the next year
+        if candidate >= today:
+            return candidate
+    raise ValueError(f"Не удалось найти подходящую дату для {day:02d}.{month:02d}.")
+
+
+def safe_parse_int(parts: Sequence[str], idx: int) -> Optional[int]:
+    """
+    Safely extracts ``int(parts[idx])`` from split callback_data, returning
+    ``None`` instead of raising on a missing index or a non-numeric segment
+    (stale/tampered/malformed callback_data).
+    """
+    if idx >= len(parts):
+        return None
+    try:
+        return int(parts[idx])
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_callback_ints(data: str, *idxs: int, sep: str = ":") -> Optional[Tuple[int, ...]]:
+    """
+    Splits ``data`` on ``sep`` and extracts integers at ``idxs``, or returns
+    ``None`` if the data is too short or any requested segment isn't a valid
+    integer. Convenience wrapper around :func:`safe_parse_int` for the common
+    "parse several int fields from one callback_data string" case.
+    """
+    parts = data.split(sep)
+    values = []
+    for idx in idxs:
+        value = safe_parse_int(parts, idx)
+        if value is None:
+            return None
+        values.append(value)
+    return tuple(values)

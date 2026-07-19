@@ -11,7 +11,7 @@ from database.db import get_schedule, get_lesson_slots, get_homework
 from database.models import Homework, LessonSlot, Schedule
 from keyboards.inline import DAYS_RU
 from config import TIMEZONE
-from utils import escape_markdown, send_long_message
+from utils import html_escape, send_long_message
 
 router = Router()
 tz = pytz.timezone(TIMEZONE)
@@ -60,10 +60,10 @@ async def get_today_data(chat_id: int, today: datetime.date) -> TodayData:
 
 
 def _format_hw_line(hw: Homework, prefix_emoji: str, date_label: str) -> str:
-    safe_subject = escape_markdown(hw.subject_name)
-    safe_desc = escape_markdown(hw.description)
+    safe_subject = html_escape(hw.subject_name)
+    safe_desc = html_escape(hw.description)
     due_str = hw.due_date.strftime("%d.%m")
-    return f"{prefix_emoji} **{safe_subject}** ({date_label} {due_str}): _{safe_desc}_"
+    return f"{prefix_emoji} <b>{safe_subject}</b> ({date_label} {due_str}): <i>{safe_desc}</i>"
 
 
 def format_today_message(data: TodayData, today: datetime.date) -> str:
@@ -72,7 +72,7 @@ def format_today_message(data: TodayData, today: datetime.date) -> str:
     final message text. No DB/network access, so it's trivially testable.
     """
     day_name = DAYS_RU[data.weekday]
-    sections = [f"📚 **Сегодня — {day_name}, {today.strftime('%d.%m.%Y')}**"]
+    sections = [f"📚 <b>Сегодня — {day_name}, {today.strftime('%d.%m.%Y')}</b>"]
 
     # --- Schedule ---
     schedule_lines = []
@@ -85,13 +85,13 @@ def format_today_message(data: TodayData, today: datetime.date) -> str:
             subject = sched_map.get(slot.lesson_number)
             if subject:
                 any_lesson = True
-                safe_subject = escape_markdown(subject)
+                safe_subject = html_escape(subject)
                 schedule_lines.append(
-                    f"{slot.lesson_number}️⃣ `{slot.start_time} - {slot.end_time}` | 📘 **{safe_subject}**"
+                    f"{slot.lesson_number}️⃣ <code>{slot.start_time} - {slot.end_time}</code> | 📘 <b>{safe_subject}</b>"
                 )
         if not any_lesson:
             schedule_lines.append("🥱 Сегодня нет уроков!")
-    sections.append("🗓 **Расписание на сегодня:**\n" + "\n".join(schedule_lines))
+    sections.append("🗓 <b>Расписание на сегодня:</b>\n" + "\n".join(schedule_lines))
 
     # --- Homework due today ---
     if data.homework_today:
@@ -99,17 +99,17 @@ def format_today_message(data: TodayData, today: datetime.date) -> str:
             _format_hw_line(hw, "⏳", "до")
             for hw in data.homework_today
         ]
-        sections.append("⏳ **ДЗ на сегодня:**\n" + "\n".join(lines))
+        sections.append("⏳ <b>ДЗ на сегодня:</b>\n" + "\n".join(lines))
 
     # --- Overdue homework ---
     if data.overdue:
         lines = [_format_hw_line(hw, "🔥", "было до") for hw in data.overdue]
-        sections.append("🔥 **Просроченные задания:**\n" + "\n".join(lines))
+        sections.append("🔥 <b>Просроченные задания:</b>\n" + "\n".join(lines))
 
     # --- Upcoming homework ---
     if data.upcoming:
         lines = [_format_hw_line(hw, "📌", "до") for hw in data.upcoming]
-        sections.append("📅 **Ближайшие задания:**\n" + "\n".join(lines))
+        sections.append("📅 <b>Ближайшие задания:</b>\n" + "\n".join(lines))
 
     if not data.homework_today and not data.overdue and not data.upcoming:
         sections.append("🎉 Никаких активных заданий не найдено!")
@@ -123,4 +123,4 @@ async def show_today(message: Message, state: FSMContext):
     today = datetime.datetime.now(tz).date()
     data = await get_today_data(message.chat.id, today)
     text = format_today_message(data, today)
-    await send_long_message(message, text, parse_mode="Markdown")
+    await send_long_message(message, text, parse_mode="HTML")

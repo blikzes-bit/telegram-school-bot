@@ -1,11 +1,11 @@
-aiogram>=3.13.0,<4.0.0
-SQLAlchemy>=2.0.0,<3.0.0
-greenlet>=3.0.0
-aiosqlite>=0.20.0,<0.22.0
-apscheduler>=3.10.0,<4.0.0
-python-dotenv>=1.0.0,<2.0.0
-pytz>=2024.1
-
-# --- Test-only dependencies ---
-pytest>=8.0.0,<9.0.0
-pytest-asyncio>=0.24.0,<0.27.0
+# Production dependencies only. Pinned to exact versions for reproducible
+# builds — see requirements-dev.txt for test/lint/type-check tooling, which
+# must never be installed into the production Docker image.
+aiogram==3.29.1
+SQLAlchemy==2.0.51
+greenlet==3.5.3
+aiosqlite==0.22.1
+alembic==1.18.5
+APScheduler==3.11.3
+python-dotenv==1.2.2
+pytz==2026.2

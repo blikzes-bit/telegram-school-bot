@@ -1,4 +1,7 @@
-from sqlalchemy import BigInteger, Boolean, Column, Date, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger, Boolean, CheckConstraint, Column, Date, ForeignKey, Index,
+    Integer, String, Text, UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 class Base(DeclarativeBase):
@@ -16,6 +19,9 @@ class Chat(Base):
     last_sch_reminder_date = Column(Date, nullable=True)
     hw_reminder_enabled = Column(Boolean, default=True, nullable=False)
     schedule_reminder_enabled = Column(Boolean, default=True, nullable=False)
+    # Set when the bot is blocked/kicked; suppresses further reminder polling
+    # for this chat until the user interacts with the bot again.
+    is_blocked = Column(Boolean, default=False, nullable=False)
 
     # Relationships
     lesson_slots = relationship("LessonSlot", back_populates="chat", cascade="all, delete-orphan")
@@ -24,6 +30,10 @@ class Chat(Base):
 
 class LessonSlot(Base):
     __tablename__ = "lesson_slots"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "lesson_number", name="uq_lesson_slots_chat_lesson"),
+        CheckConstraint("lesson_number > 0", name="ck_lesson_slots_lesson_number_positive"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
@@ -36,6 +46,11 @@ class LessonSlot(Base):
 
 class Schedule(Base):
     __tablename__ = "schedule"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "day_of_week", "lesson_number", name="uq_schedule_chat_day_lesson"),
+        CheckConstraint("day_of_week BETWEEN 0 AND 6", name="ck_schedule_day_of_week_range"),
+        CheckConstraint("lesson_number > 0", name="ck_schedule_lesson_number_positive"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
@@ -48,6 +63,9 @@ class Schedule(Base):
 
 class Homework(Base):
     __tablename__ = "homework"
+    __table_args__ = (
+        Index("ix_homework_chat_completed_due", "chat_id", "is_completed", "due_date"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
@@ -58,3 +76,32 @@ class Homework(Base):
 
     # Relationship
     chat = relationship("Chat", back_populates="homeworks")
+
+class ReminderJob(Base):
+    """
+    Outbox row for one reminder "send attempt" (one chat, one reminder kind,
+    one calendar day). Provides idempotent, resumable, multi-instance-safe
+    delivery of long/multi-chunk reminders — see services/scheduler.py.
+    """
+    __tablename__ = "reminder_jobs"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "kind", "job_date", name="uq_reminder_job_chat_kind_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String, nullable=False)  # "hw" | "sched"
+    job_date = Column(Date, nullable=False)
+    chunks_json = Column(Text, nullable=False)  # JSON list[str] of rendered message chunks
+    chunks_total = Column(Integer, nullable=False)
+    chunks_sent = Column(Integer, default=0, nullable=False)
+    status = Column(String, default="pending", nullable=False)  # pending|in_progress|done
+    updated_at = Column(String, nullable=False)  # ISO timestamp string (informational/staleness only)
+
+class FSMStateRow(Base):
+    """Persistent backing store for aiogram FSM state (see database/fsm_storage.py)."""
+    __tablename__ = "fsm_state"
+
+    key = Column(String, primary_key=True)
+    state = Column(String, nullable=True)
+    data = Column(Text, nullable=False, default="{}")

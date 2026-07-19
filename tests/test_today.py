@@ -127,17 +127,18 @@ async def test_sunday_shows_sunday_not_monday(db):
     assert "Понедельничный урок" not in text
 
 
-async def test_markdown_is_escaped(db):
+async def test_html_special_chars_are_escaped(db):
     await _onboarded_chat()
     today = datetime.datetime.now(tz).date()
-    await add_homework(CHAT_ID, "Матем*атика", today, "стр. 5, *важно* [срочно]")
+    await add_homework(CHAT_ID, "Матем<атика>", today, "стр. 5 & <b>важно</b>")
 
     data = await get_today_data(CHAT_ID, today)
     text = format_today_message(data, today)
 
-    assert "Матем\\*атика" in text
-    assert "\\*важно\\*" in text
-    assert "\\[срочно]" in text
+    assert "Матем&lt;атика&gt;" in text
+    assert "стр. 5 &amp; &lt;b&gt;важно&lt;/b&gt;" in text
+    # No raw, un-escaped HTML tags from user input should reach the message.
+    assert "<атика>" not in text
 
 
 async def test_long_text_respects_telegram_limit(db):

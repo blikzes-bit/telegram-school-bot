@@ -5,7 +5,7 @@ import pytz
 
 from utils import split_message, MAX_MESSAGE_LENGTH
 from config import TIMEZONE
-from database.db import get_or_create_chat, add_homework, save_schedule_day, save_lesson_slots
+from database.db import get_or_create_chat, add_homework
 from handlers.homework import format_homework_list
 
 tz = pytz.timezone(TIMEZONE)

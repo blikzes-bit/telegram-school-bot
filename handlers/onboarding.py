@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -7,10 +8,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
-from database.db import get_or_create_chat, set_onboarded, save_lesson_slots, save_schedule_day
+from database.db import get_or_create_chat, finalize_onboarding
 from keyboards.reply import get_main_menu
 from keyboards.inline import DAYS_RU
-from utils import parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN
+from middleware.access import require_admin
+from utils import parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN, html_escape
 
 router = Router()
 
@@ -23,11 +25,16 @@ STANDARD_TIMES = [
     ("09:00 - 09:45", "09:55 - 10:40"),
 ]
 
+YES_ANSWERS = {"да", "yes"}
+NO_ANSWERS = {"нет", "no"}
+
+
 class OnboardingStates(StatesGroup):
     waiting_for_lessons_count = State()
     waiting_for_lesson_times = State()
     waiting_for_schedule_subjects = State()
     waiting_for_saturday_decision = State()
+
 
 def get_cancel_markup() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -35,11 +42,22 @@ def get_cancel_markup() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+
 def get_yes_no_markup() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="✅ Да"), KeyboardButton(text="❌ Нет")]],
         resize_keyboard=True
     )
+
+
+async def _try_delete(message: Message) -> None:
+    """Best-effort message deletion — never lets a delete failure (missing
+    rights, too old, already gone) break the onboarding flow."""
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
 
 def build_time_keyboard() -> InlineKeyboardMarkup:
     """Quick-pick buttons for lesson times."""
@@ -66,29 +84,60 @@ def build_time_keyboard() -> InlineKeyboardMarkup:
         buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-async def ask_for_lesson_time(message_or_callback, lesson_num: int, parse_mode="Markdown"):
-    text = (
-        f"Введи время для **Урока №{lesson_num}** в формате `ЧЧ:ММ - ЧЧ:ММ`\n"
-        f"или выбери готовый вариант:"
-    )
-    kb = build_time_keyboard()
-    if hasattr(message_or_callback, "edit_text"):
-        await message_or_callback.edit_text(text, reply_markup=kb, parse_mode=parse_mode)
-    else:
-        await message_or_callback.answer(text, reply_markup=kb, parse_mode=parse_mode)
 
 @router.callback_query(F.data == "ob_start")
 async def start_onboarding_callback(callback: CallbackQuery, state: FSMContext):
+    chat = await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
+
+    if not await require_admin(callback, callback.bot):
+        return
+
+    if chat.is_onboarded:
+        await callback.answer()
+        await callback.message.answer(
+            "⚠️ Этот чат уже настроен.\n\n"
+            "Если продолжить, <b>всё текущее расписание и время звонков будут заменены</b>. "
+            "Домашние задания при этом не удаляются.\n\n"
+            "Переконфигурировать?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да, переконфигурировать", callback_data="ob_reconfigure_confirm"),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="ob_reconfigure_cancel"),
+                ]
+            ]),
+            parse_mode="HTML",
+        )
+        return
+
     await callback.answer()
-    await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
+    await _begin_onboarding(callback.message, state)
+
+
+@router.callback_query(F.data == "ob_reconfigure_confirm")
+async def reconfigure_confirm(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await callback.answer()
+    await _begin_onboarding(callback.message, state)
+
+
+@router.callback_query(F.data == "ob_reconfigure_cancel")
+async def reconfigure_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Отменено.")
+    await callback.message.answer("Ок, ничего не меняем.", reply_markup=get_main_menu())
+
+
+async def _begin_onboarding(message: Message, state: FSMContext):
+    await state.clear()
     await state.set_state(OnboardingStates.waiting_for_lessons_count)
-    await callback.message.answer(
-        "1️⃣ **Шаг 1 из 3: Количество уроков**\n\n"
+    await message.answer(
+        "1️⃣ <b>Шаг 1 из 3: Количество уроков</b>\n\n"
         "Сколько максимум уроков в день у тебя бывает?\n"
-        "Отправь мне число от 1 до 10 (например, `6`):",
+        "Отправь мне число от 1 до 10 (например, <code>6</code>):",
         reply_markup=get_cancel_markup(),
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
+
 
 # Cancel any onboarding state
 @router.message(OnboardingStates.waiting_for_lessons_count, F.text == "❌ Сбросить настройку")
@@ -105,40 +154,48 @@ async def cancel_onboarding(message: Message, state: FSMContext):
         )
     )
 
+
 @router.message(OnboardingStates.waiting_for_lessons_count, F.text)
 async def process_lessons_count(message: Message, state: FSMContext):
     text = message.text.strip()
-    if not text.isdigit() or not (1 <= int(text) <= 10):
+    try:
+        lessons_count = int(text)
+    except ValueError:
+        await message.answer("Пожалуйста, введи число от 1 до 10.")
+        return
+    if not (1 <= lessons_count <= 10):
         await message.answer("Пожалуйста, введи число от 1 до 10.")
         return
 
-    lessons_count = int(text)
     await state.update_data(lessons_count=lessons_count, current_lesson_idx=1, lesson_slots=[])
     await state.set_state(OnboardingStates.waiting_for_lesson_times)
 
     await message.answer(
-        "2️⃣ **Шаг 2 из 3: Время звонков**\n\n"
+        "2️⃣ <b>Шаг 2 из 3: Время звонков</b>\n\n"
         "Давай настроим время для каждого урока.",
         reply_markup=get_cancel_markup(),
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
     # Ask for lesson 1 with quick-pick keyboard
     await message.answer(
-        f"Введи время для **Урока №1** в формате `ЧЧ:ММ - ЧЧ:ММ`\nили выбери готовый вариант:",
+        "Введи время для <b>Урока №1</b> в формате <code>ЧЧ:ММ - ЧЧ:ММ</code>\nили выбери готовый вариант:",
         reply_markup=build_time_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
 
-async def _save_time_slot(state: FSMContext, chat_id: int, slot_str: str):
+
+async def _save_time_slot(state: FSMContext, slot_str: str):
     """
-    Parses 'HH:MM - HH:MM', validates it and appends to state.
+    Parses 'HH:MM - HH:MM', validates it and appends to FSM state (never
+    written to the real lesson_slots table here — everything is persisted in
+    one transaction at the very end of onboarding, see _finalize_onboarding).
 
     Returns a ``(done, error)`` tuple:
       * ``error`` is a user-facing message when the interval is invalid
         (bad format, start not before end, overlaps the previous lesson);
         in that case state is left completely untouched.
-      * ``done`` is ``True`` once all lesson slots have been collected and
-        persisted, ``False`` while more slots remain.
+      * ``done`` is ``True`` once all lesson slots have been collected,
+        ``False`` while more slots remain.
     """
     data = await state.get_data()
     lesson_slots = data.get("lesson_slots", [])
@@ -159,8 +216,8 @@ async def _save_time_slot(state: FSMContext, chat_id: int, slot_str: str):
         await state.update_data(current_lesson_idx=current_lesson_idx + 1)
         return False, None  # more slots remain
     else:
-        await save_lesson_slots(chat_id, new_slots)
         return True, None   # done
+
 
 async def _start_schedule_setup(message: Message, state: FSMContext, lesson_slots):
     """Start day-by-day schedule collection after lesson times are set."""
@@ -176,19 +233,20 @@ async def _start_schedule_setup(message: Message, state: FSMContext, lesson_slot
     day_name = DAYS_RU[0]
     slot_time = f"{lesson_slots[0][1]} - {lesson_slots[0][2]}"
     await message.answer(
-        "3️⃣ **Шаг 3 из 3: Расписание предметов**\n\n"
-        f"📅 **{day_name}**\n"
+        "3️⃣ <b>Шаг 3 из 3: Расписание предметов</b>\n\n"
+        f"📅 <b>{day_name}</b>\n"
         f"Урок №1 ({slot_time}): Какой предмет?\n"
-        "Напиши название (например, `Математика`) или напиши `пропустить` / `skip`:",
+        "Напиши название (например, <code>Математика</code>) или напиши <code>пропустить</code> / <code>skip</code>:",
         reply_markup=get_cancel_markup(),
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
+
 
 # Quick-pick time button handler
 @router.callback_query(OnboardingStates.waiting_for_lesson_times, F.data.startswith("ob_time:"))
 async def process_time_preset(callback: CallbackQuery, state: FSMContext):
     slot_str = callback.data[len("ob_time:"):]
-    done, error = await _save_time_slot(state, callback.message.chat.id, slot_str)
+    done, error = await _save_time_slot(state, slot_str)
 
     if error:
         await callback.answer(error, show_alert=True)
@@ -200,35 +258,37 @@ async def process_time_preset(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         next_idx = data["current_lesson_idx"]
         await callback.message.edit_text(
-            f"Введи время для **Урока №{next_idx}** в формате `ЧЧ:ММ - ЧЧ:ММ`\nили выбери готовый вариант:",
+            f"Введи время для <b>Урока №{next_idx}</b> в формате <code>ЧЧ:ММ - ЧЧ:ММ</code>\nили выбери готовый вариант:",
             reply_markup=build_time_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML",
         )
     else:
         data = await state.get_data()
-        await callback.message.delete()
+        await _try_delete(callback.message)
         await _start_schedule_setup(callback.message, state, data["lesson_slots"])
+
 
 # Text time entry handler
 @router.message(OnboardingStates.waiting_for_lesson_times, F.text)
 async def process_lesson_times_text(message: Message, state: FSMContext):
-    done, error = await _save_time_slot(state, message.chat.id, message.text.strip())
+    done, error = await _save_time_slot(state, message.text.strip())
 
     if error:
-        await message.answer(f"⚠️ {error}", parse_mode="Markdown")
+        await message.answer(f"⚠️ {html_escape(error)}", parse_mode="HTML")
         return
 
     if not done:
         data = await state.get_data()
         next_idx = data["current_lesson_idx"]
         await message.answer(
-            f"Введи время для **Урока №{next_idx}** в формате `ЧЧ:ММ - ЧЧ:ММ`\nили выбери готовый вариант:",
+            f"Введи время для <b>Урока №{next_idx}</b> в формате <code>ЧЧ:ММ - ЧЧ:ММ</code>\nили выбери готовый вариант:",
             reply_markup=build_time_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML",
         )
     else:
         data = await state.get_data()
         await _start_schedule_setup(message, state, data["lesson_slots"])
+
 
 def _get_subject_keyboard(day_idx: int, lesson_num: int, prev_day_lessons=None) -> ReplyKeyboardMarkup:
     """Build reply keyboard for subject entry with Back/Skip/Copy options."""
@@ -240,6 +300,7 @@ def _get_subject_keyboard(day_idx: int, lesson_num: int, prev_day_lessons=None) 
         buttons.append([KeyboardButton(text="⬅️ Назад")])
     buttons.append([KeyboardButton(text="❌ Сбросить настройку")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
 
 SCHEDULE_ACTION_BUTTONS = {"⬅️ Назад", "📋 Скопировать вчерашний день", "⏭️ Пропустить"}
 
@@ -270,17 +331,17 @@ async def process_schedule_subjects(message: Message, state: FSMContext):
     if subject_input == "⬅️ Назад":
         if current_lesson_idx > 1:
             # Go back one lesson in current day
-            current_day_lessons = [l for l in current_day_lessons if l[0] != current_lesson_idx - 1]
+            current_day_lessons = [lesson for lesson in current_day_lessons if lesson[0] != current_lesson_idx - 1]
             current_lesson_idx -= 1
             await state.update_data(current_lesson_idx=current_lesson_idx, current_day_lessons=current_day_lessons)
             slot = lesson_slots[current_lesson_idx - 1]
             slot_time = f"{slot[1]} - {slot[2]}"
             prev_day = all_schedule_data.get(target_days[current_day_list_idx - 1]) if current_day_list_idx > 0 else None
             await message.answer(
-                f"📅 **{DAYS_RU[day_idx]}**\n"
+                f"📅 <b>{DAYS_RU[day_idx]}</b>\n"
                 f"Урок №{current_lesson_idx} ({slot_time}): Какой предмет?",
                 reply_markup=_get_subject_keyboard(day_idx, current_lesson_idx, prev_day),
-                parse_mode="Markdown"
+                parse_mode="HTML",
             )
         elif current_day_list_idx > 0:
             # Go back to previous day's last lesson
@@ -303,11 +364,11 @@ async def process_schedule_subjects(message: Message, state: FSMContext):
             slot_time = f"{slot[1]} - {slot[2]}"
             prev_prev_day = all_schedule_data.get(target_days[current_day_list_idx - 1]) if current_day_list_idx > 0 else None
             await message.answer(
-                f"📅 **{DAYS_RU[prev_day_idx]}**\n"
+                f"📅 <b>{DAYS_RU[prev_day_idx]}</b>\n"
                 f"Урок №{new_lesson_idx} ({slot_time}): Какой предмет?\n"
                 f"(Повторный ввод)",
                 reply_markup=_get_subject_keyboard(prev_day_idx, new_lesson_idx, prev_prev_day),
-                parse_mode="Markdown"
+                parse_mode="HTML",
             )
         else:
             await message.answer("Вернуться дальше не получится — это первый урок!")
@@ -346,11 +407,11 @@ async def process_schedule_subjects(message: Message, state: FSMContext):
         slot_time = f"{slot[1]} - {slot[2]}"
         prev_day = all_schedule_data.get(target_days[current_day_list_idx - 1]) if current_day_list_idx > 0 else None
         await message.answer(
-            f"📅 **{DAYS_RU[day_idx]}**\n"
+            f"📅 <b>{DAYS_RU[day_idx]}</b>\n"
             f"Урок №{next_idx} ({slot_time}): Какой предмет?\n"
-            "Напиши название или напиши `пропустить`:",
+            "Напиши название или напиши <code>пропустить</code>:",
             reply_markup=_get_subject_keyboard(day_idx, next_idx, prev_day),
-            parse_mode="Markdown"
+            parse_mode="HTML",
         )
     else:
         # Day done
@@ -359,11 +420,10 @@ async def process_schedule_subjects(message: Message, state: FSMContext):
         await _advance_to_next_day(message, state, target_days, current_day_list_idx, day_idx,
                                    all_schedule_data, lesson_slots, lessons_count)
 
+
 async def _advance_to_next_day(message, state, target_days, current_day_list_idx, day_idx,
                                 all_schedule_data, lesson_slots, lessons_count):
     """Move to the next day in onboarding, or finish."""
-    data = await state.get_data()
-
     if current_day_list_idx < len(target_days) - 1:
         # There are more days to fill
         next_day_list_idx = current_day_list_idx + 1
@@ -378,11 +438,11 @@ async def _advance_to_next_day(message, state, target_days, current_day_list_idx
         # Previous day's lessons for copy button
         prev_lessons = all_schedule_data.get(day_idx)
         await message.answer(
-            f"📅 **{DAYS_RU[next_day_idx]}**\n"
+            f"📅 <b>{DAYS_RU[next_day_idx]}</b>\n"
             f"Урок №1 ({slot_time}): Какой предмет?\n"
-            "Напиши название или напиши `пропустить`:",
+            "Напиши название или напиши <code>пропустить</code>:",
             reply_markup=_get_subject_keyboard(next_day_idx, 1, prev_lessons),
-            parse_mode="Markdown"
+            parse_mode="HTML",
         )
     else:
         # We finished all current target_days
@@ -390,27 +450,36 @@ async def _advance_to_next_day(message, state, target_days, current_day_list_idx
             # Just finished Friday, ask about Saturday
             await state.set_state(OnboardingStates.waiting_for_saturday_decision)
             await message.answer(
-                "📅 Хочешь настроить расписание на **Субботу**?",
+                "📅 Хочешь настроить расписание на <b>Субботу</b>?",
                 reply_markup=get_yes_no_markup(),
-                parse_mode="Markdown"
+                parse_mode="HTML",
             )
         else:
             # Finished Saturday — finalize onboarding
             await _finalize_onboarding(message, state, all_schedule_data)
 
-async def _finalize_onboarding(message, state, all_schedule_data):
+
+async def _finalize_onboarding(message: Message, state: FSMContext, all_schedule_data):
+    """
+    Persists the entire onboarding result — lesson slots, schedule for every
+    configured day, and the is_onboarded flag — in a single DB transaction
+    (see database.db.finalize_onboarding). If anything fails, nothing is
+    written and the chat's previous configuration (if any) is left intact.
+    """
     chat_id = message.chat.id
-    for d_idx, lessons in all_schedule_data.items():
-        await save_schedule_day(chat_id, d_idx, lessons)
-    await set_onboarded(chat_id, True)
+    data = await state.get_data()
+    lesson_slots = data["lesson_slots"]
+
+    await finalize_onboarding(chat_id, message.chat.type, lesson_slots, all_schedule_data)
     await state.clear()
     await message.answer(
-        "🎉 **Настройка завершена!**\n\n"
+        "🎉 <b>Настройка завершена!</b>\n\n"
         "Все данные успешно сохранены. Теперь ты можешь полноценно пользоваться ботом!\n"
         "Вот твоё главное меню ниже 👇",
         reply_markup=get_main_menu(),
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
+
 
 @router.message(OnboardingStates.waiting_for_saturday_decision, F.text)
 async def process_saturday_decision(message: Message, state: FSMContext):
@@ -419,7 +488,7 @@ async def process_saturday_decision(message: Message, state: FSMContext):
     lesson_slots = data["lesson_slots"]
     all_schedule_data = data["all_schedule_data"]
 
-    if "да" in text or "yes" in text:
+    if text in YES_ANSWERS:
         # Add Saturday (day_idx = 5) to target_days
         new_target_days = data["target_days"] + [5]
         await state.update_data(
@@ -433,13 +502,13 @@ async def process_saturday_decision(message: Message, state: FSMContext):
         slot_time = f"{slot[1]} - {slot[2]}"
         prev_lessons = all_schedule_data.get(4)  # Friday's lessons
         await message.answer(
-            "📅 **Суббота**\n"
+            "📅 <b>Суббота</b>\n"
             f"Урок №1 ({slot_time}): Какой предмет?\n"
-            "Напиши название или напиши `пропустить`:",
+            "Напиши название или напиши <code>пропустить</code>:",
             reply_markup=_get_subject_keyboard(5, 1, prev_lessons),
-            parse_mode="Markdown"
+            parse_mode="HTML",
         )
-    elif "нет" in text or "no" in text:
+    elif text in NO_ANSWERS:
         await _finalize_onboarding(message, state, all_schedule_data)
     else:
         await message.answer("Пожалуйста, ответь Да или Нет.")
