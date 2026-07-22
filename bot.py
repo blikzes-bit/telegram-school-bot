@@ -49,7 +49,7 @@ async def main():
     # Bring the production schema up to date (Alembic migrations) instead of
     # a bare create_all — see database/migrate.py.
     logger.info("Running database migrations...")
-    run_migrations()
+    await run_migrations()
 
     # Initialize Bot and Dispatcher
     bot = Bot(token=BOT_TOKEN)
