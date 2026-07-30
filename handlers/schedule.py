@@ -1,22 +1,28 @@
 import datetime
-import pytz
+from typing import Optional, Tuple
+
 from aiogram import Router, F
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from database.db import get_schedule, get_lesson_slots, update_schedule_slot, save_lesson_slots
+from database.db import (
+    get_schedule, get_lesson_slots, update_schedule_slot, save_lesson_slots,
+    get_extra_activities, get_chat, set_week_mode, copy_schedule_week,
+)
+from handlers.extra import activities_for_weekday, format_extra_activities_block
+from services.effective_schedule import resolve_week_type, WEEK_LABELS
 from keyboards.inline import get_schedule_days_keyboard, DAYS_RU, get_cancel_keyboard
 from keyboards.reply import get_main_menu
 from middleware.access import require_admin
-from config import TIMEZONE
+import services.audit as audit
+import services.timeservice as ts
 from utils import (
     html_escape, safe_edit_text, safe_callback_ints,
     parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN,
 )
 
 router = Router()
-tz = pytz.timezone(TIMEZONE)
 
 NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь сообщение текстом (или нажми «❌ Отмена»)."
 STALE_BUTTON_TEXT = "⚠️ Эта кнопка устарела, открой расписание заново."
@@ -28,15 +34,42 @@ class EditScheduleStates(StatesGroup):
     waiting_for_lesson_times = State()
 
 
-async def format_schedule_message(chat_id: int, day_idx: int) -> str:
-    schedule_items = await get_schedule(chat_id, day_idx)
+async def _week_context(chat_id: int, requested: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Returns ``(week_mode, week_type)`` for the schedule editor: whether the chat
+    uses alternating weeks and which week to show. When ``requested`` is a valid
+    'A'/'B' it is honoured; otherwise the current week (from today) is used.
+    """
+    chat = await get_chat(chat_id)
+    week_mode = bool(chat and chat.week_mode)
+    if not week_mode:
+        return False, "all"
+    if requested in ("A", "B"):
+        return True, requested
+    # Which A/B week it is depends on the chat's own today, not the server's.
+    today = ts.now(chat).date()
+    return True, resolve_week_type(True, chat.week_anchor_monday, today)
+
+
+async def format_schedule_message(chat_id: int, day_idx: int, week_type: str = "all") -> str:
+    schedule_items = await get_schedule(chat_id, day_idx, week_type=week_type)
     slots = await get_lesson_slots(chat_id)
 
+    today = await ts.today_for_chat_id(chat_id)
+    extra = activities_for_weekday(await get_extra_activities(chat_id), day_idx, today)
+    extra_block = format_extra_activities_block(extra, with_date=True)
+
     day_name = DAYS_RU[day_idx]
-    message_text = f"📅 <b>Расписание на {day_name}</b>\n\n"
+    message_text = f"📅 <b>Расписание на {day_name}</b>\n"
+    if week_type != "all":
+        message_text += f"🗓 <i>Редактируется: {WEEK_LABELS[week_type]}</i>\n"
+    message_text += "\n"
 
     if not slots:
-        return "⚠️ Время уроков еще не настроено. Напиши /start для настройки."
+        base = "⚠️ Время уроков еще не настроено. Напиши /start для настройки."
+        if extra_block:
+            return base + "\n\n" + extra_block
+        return base
 
     # Map schedule items by lesson number
     sched_map = {item.lesson_number: item.subject_name for item in schedule_items}
@@ -73,6 +106,9 @@ async def format_schedule_message(chat_id: int, day_idx: int) -> str:
     if not has_any:
         message_text += "\n🥱 В этот день нет уроков!"
 
+    if extra_block:
+        message_text += "\n\n" + extra_block
+
     return message_text
 
 
@@ -80,19 +116,25 @@ def _valid_day(day_idx) -> bool:
     return day_idx is not None and 0 <= day_idx <= 6
 
 
+@router.message(Command("schedule"))
 @router.message(F.text == "📅 Расписание")
 async def show_schedule(message: Message, state: FSMContext):
     await state.clear()
-    # Determine current day of week (0=Mon, 6=Sun) based on configured timezone
-    now = datetime.datetime.now(tz)
-    current_day = now.weekday()
+    # Current day of week (0=Mon, 6=Sun) in this chat's own timezone.
+    current_day = (await ts.today_for_chat_id(message.chat.id)).weekday()
     # Default to Monday if Sunday (since typically there are no Sunday classes)
     if current_day == 6:
         current_day = 0
 
-    text = await format_schedule_message(message.chat.id, current_day)
-    kb = get_schedule_days_keyboard(current_day)
+    week_mode, week_type = await _week_context(message.chat.id)
+    text = await format_schedule_message(message.chat.id, current_day, week_type)
+    kb = get_schedule_days_keyboard(current_day, week_mode, week_type)
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+def _requested_week(data: str, idx: int) -> Optional[str]:
+    parts = data.split(":")
+    return parts[idx] if len(parts) > idx and parts[idx] in ("A", "B") else None
 
 
 @router.callback_query(F.data.startswith("sch_day:"))
@@ -103,8 +145,9 @@ async def process_day_select(callback: CallbackQuery, state: FSMContext):
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     day_idx = ints[0]
-    text = await format_schedule_message(callback.message.chat.id, day_idx)
-    kb = get_schedule_days_keyboard(day_idx)
+    week_mode, week_type = await _week_context(callback.message.chat.id, _requested_week(callback.data, 2))
+    text = await format_schedule_message(callback.message.chat.id, day_idx, week_type)
+    kb = get_schedule_days_keyboard(day_idx, week_mode, week_type)
     await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -121,8 +164,9 @@ async def edit_schedule_day(callback: CallbackQuery):
     day_idx = ints[0]
     day_name = DAYS_RU[day_idx]
     chat_id = callback.message.chat.id
+    _, week_type = await _week_context(chat_id, _requested_week(callback.data, 2))
 
-    schedule_items = await get_schedule(chat_id, day_idx)
+    schedule_items = await get_schedule(chat_id, day_idx, week_type=week_type)
     slots = await get_lesson_slots(chat_id)
 
     if not slots:
@@ -136,13 +180,16 @@ async def edit_schedule_day(callback: CallbackQuery):
         num = slot.lesson_number
         subject = sched_map.get(num, "—")
         btn_text = f"Урок {num}: {subject}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"se_slot:{day_idx}:{num}")])
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"se_slot:{day_idx}:{num}:{week_type}")])
 
-    buttons.append([InlineKeyboardButton(text="🔙 Назад к расписанию", callback_data=f"sch_day:{day_idx}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад к расписанию", callback_data=f"sch_day:{day_idx}:{week_type}")])
 
+    header = f"✏️ <b>Редактирование: {day_name}</b>"
+    if week_type != "all":
+        header += f"\n🗓 <i>{WEEK_LABELS[week_type]}</i>"
     await safe_edit_text(
         callback.message,
-        f"✏️ <b>Редактирование: {day_name}</b>\nВыберите урок, который хотите изменить:",
+        f"{header}\nВыберите урок, который хотите изменить:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
     )
@@ -160,16 +207,18 @@ async def initiate_slot_edit(callback: CallbackQuery, state: FSMContext):
         return
     day_idx, lesson_num = ints
     day_name = DAYS_RU[day_idx]
+    _, week_type = await _week_context(callback.message.chat.id, _requested_week(callback.data, 3))
 
-    await state.update_data(edit_day_idx=day_idx, edit_lesson_num=lesson_num)
+    await state.update_data(edit_day_idx=day_idx, edit_lesson_num=lesson_num, edit_week=week_type)
     await state.set_state(EditScheduleStates.waiting_for_subject_name)
 
+    week_note = f" · {WEEK_LABELS[week_type]}" if week_type != "all" else ""
     await safe_edit_text(
         callback.message,
         f"✏️ <b>Изменение урока</b>\n\n"
-        f"Вы выбрали <b>Урок №{lesson_num}</b> ({day_name}).\n"
+        f"Вы выбрали <b>Урок №{lesson_num}</b> ({day_name}{week_note}).\n"
         f"Введите новое название предмета или напишите <code>skip</code>/<code>пропустить</code>, чтобы сделать его свободным:",
-        reply_markup=get_cancel_keyboard(callback_data=f"sch_day:{day_idx}"),
+        reply_markup=get_cancel_keyboard(callback_data=f"sch_day:{day_idx}:{week_type}"),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -188,20 +237,102 @@ async def process_new_subject_name(message: Message, state: FSMContext):
     data = await state.get_data()
     day_idx = data["edit_day_idx"]
     lesson_num = data["edit_lesson_num"]
+    edit_week = data.get("edit_week", "all")
 
     normalized_sub = "" if subject.lower() in ["skip", "пропустить", "-", "нет"] else subject
 
-    await update_schedule_slot(message.chat.id, day_idx, lesson_num, normalized_sub)
+    await update_schedule_slot(message.chat.id, day_idx, lesson_num, normalized_sub, week_type=edit_week)
+    await audit.record_event(
+        message, message.chat.id, audit.ENTITY_SCHEDULE, audit.ACTION_UPDATE,
+        summary=audit.summarize(
+            DAYS_RU[day_idx], f"урок {lesson_num}",
+            WEEK_LABELS.get(edit_week) if edit_week != "all" else None,
+            normalized_sub or "освобождён",
+        ),
+    )
     await state.clear()
 
-    text = await format_schedule_message(message.chat.id, day_idx)
-    kb = get_schedule_days_keyboard(day_idx)
+    week_mode, week_type = await _week_context(message.chat.id, edit_week)
+    text = await format_schedule_message(message.chat.id, day_idx, week_type)
+    kb = get_schedule_days_keyboard(day_idx, week_mode, week_type)
 
     await message.answer(
         f"✅ Предмет для урока №{lesson_num} обновлен!",
         reply_markup=get_main_menu()
     )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+# --- Alternating (A/B) weeks: enable / disable / copy ------------------------
+
+@router.callback_query(F.data == "sch_wk_on")
+async def enable_week_mode(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    chat_id = callback.message.chat.id
+    today = await ts.today_for_chat_id(chat_id)
+    anchor = today - datetime.timedelta(days=today.weekday())  # this week's Monday = start of A
+    await set_week_mode(chat_id, True, anchor_monday=anchor)
+    await audit.record_event(
+        callback, chat_id, audit.ENTITY_SCHEDULE, audit.ACTION_UPDATE,
+        summary=audit.summarize("чередование недель включено", f"неделя A с {anchor.strftime('%d.%m.%Y')}"),
+    )
+    text = (
+        "🔀 <b>Чередование недель включено.</b>\n\n"
+        "Эта неделя — <b>A (нечётная)</b>, следующая — <b>B (чётная)</b>, и так по очереди.\n\n"
+        "Можешь скопировать текущее (обычное) расписание в обе недели, а затем "
+        "отредактировать различия, либо заполнить недели A и B с нуля."
+    )
+    kb = get_schedule_days_keyboard(today.weekday() if today.weekday() != 6 else 0, True, "A")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer("Включено!")
+
+
+@router.callback_query(F.data == "sch_wk_off")
+async def disable_week_mode(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    chat_id = callback.message.chat.id
+    await set_week_mode(chat_id, False)
+    await audit.record_event(
+        callback, chat_id, audit.ENTITY_SCHEDULE, audit.ACTION_UPDATE,
+        summary=audit.summarize("чередование недель выключено"),
+    )
+    text = (
+        "🔀 <b>Чередование недель выключено.</b>\n\n"
+        "Снова используется обычное недельное расписание (одно на все недели). "
+        "Расписания недель A и B сохранены — их можно вернуть, снова включив чередование."
+    )
+    kb = get_schedule_days_keyboard(0, False, "all")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer("Выключено.")
+
+
+@router.callback_query(F.data == "sch_copy_ab")
+async def copy_regular_into_ab(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    chat_id = callback.message.chat.id
+    week_mode, _ = await _week_context(chat_id)
+    if not week_mode:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    copied = await copy_schedule_week(chat_id, "all", "A")
+    await copy_schedule_week(chat_id, "all", "B")
+    await audit.record_event(
+        callback, chat_id, audit.ENTITY_SCHEDULE, audit.ACTION_UPDATE,
+        summary=audit.summarize("обычное расписание скопировано в недели A и B", f"уроков: {copied}"),
+    )
+    text = await format_schedule_message(chat_id, 0, "A")
+    kb = get_schedule_days_keyboard(0, True, "A")
+    await safe_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer(
+        f"Скопировано уроков: {copied} в каждую неделю." if copied
+        else "Обычное расписание пустое — копировать нечего."
+    )
 
 
 # Edit Lesson Times
@@ -275,6 +406,10 @@ async def process_edit_lesson_times(message: Message, state: FSMContext):
         # Save to DB — save_lesson_slots atomically replaces slots and prunes
         # any Schedule rows above the new max lesson number in one transaction.
         await save_lesson_slots(message.chat.id, lesson_slots)
+        await audit.record_event(
+            message, message.chat.id, audit.ENTITY_SCHEDULE, audit.ACTION_UPDATE,
+            summary=audit.summarize("время звонков", f"уроков в дне: {len(lesson_slots)}"),
+        )
         await state.clear()
 
         await message.answer(
@@ -282,9 +417,10 @@ async def process_edit_lesson_times(message: Message, state: FSMContext):
             reply_markup=get_main_menu()
         )
 
-        # Display schedule for Monday
-        text = await format_schedule_message(message.chat.id, 0)
-        kb = get_schedule_days_keyboard(0)
+        # Display schedule for Monday (current week)
+        week_mode, week_type = await _week_context(message.chat.id)
+        text = await format_schedule_message(message.chat.id, 0, week_type)
+        kb = get_schedule_days_keyboard(0, week_mode, week_type)
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 

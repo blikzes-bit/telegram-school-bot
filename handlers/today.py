@@ -2,19 +2,22 @@ import datetime
 from dataclasses import dataclass, field
 from typing import List
 
-import pytz
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from database.db import get_schedule, get_lesson_slots, get_homework
-from database.models import Homework, LessonSlot, Schedule
+from database.db import get_lesson_slots, get_homework, get_extra_activities
+from database.models import ExtraActivity, Homework
+from handlers.extra import activities_on_date, format_extra_activities_block
+from services.effective_schedule import (
+    EffectiveDay, get_effective_day, format_effective_schedule_body,
+)
 from keyboards.inline import DAYS_RU
-from config import TIMEZONE
+import services.timeservice as ts
 from utils import html_escape, send_long_message
 
 router = Router()
-tz = pytz.timezone(TIMEZONE)
 
 # Cap on how many "upcoming" homework items are shown, so the screen stays a
 # quick glance rather than turning into a full homework list.
@@ -24,11 +27,12 @@ UPCOMING_LIMIT = 5
 @dataclass
 class TodayData:
     weekday: int
-    slots: List[LessonSlot] = field(default_factory=list)
-    schedule_items: List[Schedule] = field(default_factory=list)
+    effective: EffectiveDay
+    has_slots: bool = False
     homework_today: List[Homework] = field(default_factory=list)
     overdue: List[Homework] = field(default_factory=list)
     upcoming: List[Homework] = field(default_factory=list)
+    extra_activities: List[ExtraActivity] = field(default_factory=list)
 
 
 async def get_today_data(chat_id: int, today: datetime.date) -> TodayData:
@@ -36,12 +40,17 @@ async def get_today_data(chat_id: int, today: datetime.date) -> TodayData:
     Gathers everything needed for the "Today" screen. All queries are scoped
     to ``chat_id``. ``today`` is passed in (rather than computed here) so the
     caller controls the timezone-aware "now".
+
+    The schedule is the *effective* one — the weekly template with any per-date
+    overrides (cancellations, substitutions, free/holiday days, one-off
+    lessons) already applied (see services/effective_schedule.py).
     """
     weekday = today.weekday()  # Monday=0 ... Sunday=6, same indexing as DAYS_RU.
 
     slots = await get_lesson_slots(chat_id)
-    schedule_items = await get_schedule(chat_id, weekday)
+    effective = await get_effective_day(chat_id, today)
     incomplete = await get_homework(chat_id, is_completed=False)
+    extra = activities_on_date(await get_extra_activities(chat_id), today)
 
     homework_today = [hw for hw in incomplete if hw.due_date == today]
     overdue = sorted((hw for hw in incomplete if hw.due_date < today), key=lambda hw: hw.due_date)
@@ -51,11 +60,12 @@ async def get_today_data(chat_id: int, today: datetime.date) -> TodayData:
 
     return TodayData(
         weekday=weekday,
-        slots=slots,
-        schedule_items=schedule_items,
+        effective=effective,
+        has_slots=bool(slots),
         homework_today=homework_today,
         overdue=overdue,
         upcoming=upcoming,
+        extra_activities=extra,
     )
 
 
@@ -74,24 +84,19 @@ def format_today_message(data: TodayData, today: datetime.date) -> str:
     day_name = DAYS_RU[data.weekday]
     sections = [f"📚 <b>Сегодня — {day_name}, {today.strftime('%d.%m.%Y')}</b>"]
 
-    # --- Schedule ---
-    schedule_lines = []
-    if not data.slots:
-        schedule_lines.append("⚠️ Время уроков еще не настроено.")
+    # --- Schedule (effective: template + any per-date overrides) ---
+    if not data.has_slots and data.effective.day_type is None:
+        schedule_body = "⚠️ Время уроков еще не настроено."
     else:
-        sched_map = {item.lesson_number: item.subject_name for item in data.schedule_items}
-        any_lesson = False
-        for slot in data.slots:
-            subject = sched_map.get(slot.lesson_number)
-            if subject:
-                any_lesson = True
-                safe_subject = html_escape(subject)
-                schedule_lines.append(
-                    f"{slot.lesson_number}️⃣ <code>{slot.start_time} - {slot.end_time}</code> | 📘 <b>{safe_subject}</b>"
-                )
-        if not any_lesson:
-            schedule_lines.append("🥱 Сегодня нет уроков!")
-    sections.append("🗓 <b>Расписание на сегодня:</b>\n" + "\n".join(schedule_lines))
+        schedule_body = format_effective_schedule_body(
+            data.effective, no_lessons_text="🥱 Сегодня нет уроков!"
+        )
+    sections.append("🗓 <b>Расписание на сегодня:</b>\n" + schedule_body)
+
+    # --- Extra activities (clubs / tutors / sections) ---
+    extra_block = format_extra_activities_block(data.extra_activities)
+    if extra_block:
+        sections.append(extra_block)
 
     # --- Homework due today ---
     if data.homework_today:
@@ -117,10 +122,13 @@ def format_today_message(data: TodayData, today: datetime.date) -> str:
     return "\n\n".join(sections)
 
 
+@router.message(Command("today"))
 @router.message(F.text == "📚 Сегодня")
 async def show_today(message: Message, state: FSMContext):
     await state.clear()
-    today = datetime.datetime.now(tz).date()
+    # "Today" is this chat's today: the date is resolved in the chat's own
+    # timezone, never a single global one.
+    today = await ts.today_for_chat_id(message.chat.id)
     data = await get_today_data(message.chat.id, today)
     text = format_today_message(data, today)
     await send_long_message(message, text, parse_mode="HTML")

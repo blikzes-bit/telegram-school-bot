@@ -67,16 +67,20 @@ async def require_admin(event: Union[Message, CallbackQuery], bot) -> bool:
     with a clear message/alert and returns False — callers must ``return``
     immediately afterwards.
     """
-    chat = event.chat if isinstance(event, Message) else event.message.chat
+    # Duck-type Message vs CallbackQuery: a Message carries ``chat`` directly,
+    # a CallbackQuery reaches its chat through the attached ``message``. This is
+    # robust to test doubles that don't subclass the aiogram models.
+    is_message = getattr(event, "chat", None) is not None
+    chat = event.chat if is_message else event.message.chat
     user = event.from_user
     allowed = await is_chat_admin(bot, chat.id, user.id, chat.type)
     if allowed:
         return True
 
-    if isinstance(event, CallbackQuery):
-        await event.answer(ADMIN_ONLY_TEXT, show_alert=True)
-    else:
+    if is_message:
         await event.answer(ADMIN_ONLY_TEXT)
+    else:
+        await event.answer(ADMIN_ONLY_TEXT, show_alert=True)
     return False
 
 

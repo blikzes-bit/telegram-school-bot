@@ -15,7 +15,7 @@ from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from sqlalchemy import select, update
 
 from database.models import FSMStateRow
-from database.db import AsyncSessionLocal
+from database import db
 
 
 def _key(storage_key: StorageKey) -> str:
@@ -26,7 +26,7 @@ class SQLAlchemyStorage(BaseStorage):
     async def set_state(self, key: StorageKey, state: Optional[Any] = None) -> None:
         state_str = state.state if isinstance(state, State) else state
         row_key = _key(key)
-        async with AsyncSessionLocal() as session:
+        async with db.AsyncSessionLocal() as session:
             existing = await session.execute(select(FSMStateRow).where(FSMStateRow.key == row_key))
             row = existing.scalar_one_or_none()
             if row is None:
@@ -39,7 +39,7 @@ class SQLAlchemyStorage(BaseStorage):
 
     async def get_state(self, key: StorageKey) -> Optional[str]:
         row_key = _key(key)
-        async with AsyncSessionLocal() as session:
+        async with db.AsyncSessionLocal() as session:
             result = await session.execute(select(FSMStateRow).where(FSMStateRow.key == row_key))
             row = result.scalar_one_or_none()
             return row.state if row is not None else None
@@ -47,7 +47,7 @@ class SQLAlchemyStorage(BaseStorage):
     async def set_data(self, key: StorageKey, data: Dict[str, Any]) -> None:
         row_key = _key(key)
         payload = json.dumps(data)
-        async with AsyncSessionLocal() as session:
+        async with db.AsyncSessionLocal() as session:
             existing = await session.execute(select(FSMStateRow).where(FSMStateRow.key == row_key))
             row = existing.scalar_one_or_none()
             if row is None:
@@ -60,7 +60,7 @@ class SQLAlchemyStorage(BaseStorage):
 
     async def get_data(self, key: StorageKey) -> Dict[str, Any]:
         row_key = _key(key)
-        async with AsyncSessionLocal() as session:
+        async with db.AsyncSessionLocal() as session:
             result = await session.execute(select(FSMStateRow).where(FSMStateRow.key == row_key))
             row = result.scalar_one_or_none()
             if row is None or not row.data:

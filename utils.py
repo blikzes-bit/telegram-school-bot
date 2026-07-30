@@ -21,6 +21,78 @@ HW_MAX_PER_PAGE = 8
 MAX_SUBJECT_LEN = 100
 MAX_DESCRIPTION_LEN = 1000
 
+# Field caps for extra activities (clubs / tutors / sections).
+MAX_TITLE_LEN = 100
+MAX_LOCATION_LEN = 100
+MAX_NOTE_LEN = 300
+
+# --- Homework attachments --------------------------------------------------
+
+# How many files one homework entry may carry. A deliberate, low cap: a card
+# with its attachments must stay a glance, and every attachment is one extra
+# Telegram send when the card is opened.
+MAX_ATTACHMENTS_PER_HOMEWORK = 5
+
+# Telegram itself refuses to *send back* a document larger than 50 MB, so
+# accepting one would store a reference we can never deliver. Photos are always
+# well under this. We never download the file — this is a metadata check only.
+MAX_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024
+
+# Captions are shown under the file; Telegram's own limit is 1024 characters.
+MAX_ATTACHMENT_CAPTION_LEN = 500
+
+# Display cap for the (untrusted) original file name.
+MAX_FILE_NAME_LEN = 100
+
+# The only two attachment kinds this bot understands. An "image sent as a file"
+# arrives as a document and is stored as one — that is intentional: it keeps its
+# original quality, exactly as the sender chose.
+ATTACHMENT_TYPES = ("photo", "document")
+
+
+def safe_file_name(raw: Optional[str]) -> Optional[str]:
+    """
+    Sanitise a client-supplied file name down to harmless display metadata.
+
+    The name is **never** trusted: it is never used as a filesystem path and
+    nothing is written to disk. We still strip anything that could mislead or
+    break rendering:
+
+      * any directory component (``../../etc/passwd`` → ``passwd``), so the
+        value can't read like a path even in logs;
+      * control characters and right-to-left overrides (the classic
+        ``report\\u202Egnp.exe`` trick that displays as ``reportexe.png``);
+      * surrounding whitespace, collapsed inner whitespace, and a length cap.
+
+    Returns ``None`` when nothing usable is left, in which case the UI falls
+    back to a generic label.
+    """
+    if not raw:
+        return None
+    name = str(raw)
+    # Drop directory components from either separator style.
+    name = name.replace("\\", "/").split("/")[-1]
+    # Strip control chars and bidi overrides that can disguise the extension.
+    name = "".join(
+        ch for ch in name
+        if ch.isprintable() and ch not in "‪‫‬‭‮⁦⁧⁨⁩"
+    )
+    name = " ".join(name.split())
+    if name in ("", ".", ".."):
+        return None
+    return name[:MAX_FILE_NAME_LEN]
+
+
+def format_file_size(size: Optional[int]) -> str:
+    """Human-readable size for an attachment line ("1.2 МБ"), "" if unknown."""
+    if not size or size < 0:
+        return ""
+    if size < 1024:
+        return f"{size} Б"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f} КБ"
+    return f"{size / (1024 * 1024):.1f} МБ"
+
 
 def html_escape(text: str) -> str:
     """
@@ -108,6 +180,8 @@ _TIME_INTERVAL_RE = re.compile(
     r"^\s*([0-1]?\d|2[0-3]):([0-5]\d)\s*-\s*([0-1]?\d|2[0-3]):([0-5]\d)\s*$"
 )
 
+_SINGLE_TIME_RE = re.compile(r"^\s*([0-1]?\d|2[0-3]):([0-5]\d)\s*$")
+
 
 def parse_time_interval(raw: Optional[str]) -> Tuple[str, str]:
     """
@@ -138,6 +212,34 @@ def parse_time_interval(raw: Optional[str]) -> Tuple[str, str]:
         )
 
     return start, end
+
+
+def parse_activity_time(raw: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    Parses a start time for an extra activity, accepting either a single time
+    ``"18:00"`` (returns ``("18:00", None)``) or an interval ``"18:00 - 19:00"``
+    (returns ``("18:00", "19:00")``), both normalized to zero-padded ``HH:MM``.
+
+    Raises ``ValueError`` with a user-friendly Russian message on a bad format
+    or when the interval's start is not strictly earlier than its end.
+    """
+    if not raw:
+        raise ValueError("Пустое значение времени.")
+
+    match = _SINGLE_TIME_RE.match(raw)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        return f"{hour:02d}:{minute:02d}", None
+
+    if _TIME_INTERVAL_RE.match(raw):
+        # Reuse the interval parser (also enforces start < end).
+        start, end = parse_time_interval(raw)
+        return start, end
+
+    raise ValueError(
+        "Неверный формат времени! Используй `ЧЧ:ММ` или `ЧЧ:ММ - ЧЧ:ММ`, "
+        "например `18:00` или `18:00 - 19:00`."
+    )
 
 
 def validate_against_previous(start: str, prev_end: Optional[str]) -> None:

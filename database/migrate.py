@@ -3,15 +3,20 @@ import os
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ALEMBIC_INI = os.path.join(_PROJECT_ROOT, "alembic.ini")
 
 
-def _upgrade_to_head() -> None:
+def _config() -> Config:
     cfg = Config(_ALEMBIC_INI)
     cfg.set_main_option("script_location", os.path.join(_PROJECT_ROOT, "alembic"))
-    command.upgrade(cfg, "head")
+    return cfg
+
+
+def _upgrade_to_head() -> None:
+    command.upgrade(_config(), "head")
 
 
 async def run_migrations() -> None:
@@ -27,3 +32,12 @@ async def run_migrations() -> None:
     hands Alembic a thread with no active loop, so its ``asyncio.run`` works.
     """
     await asyncio.to_thread(_upgrade_to_head)
+
+
+def get_script_head() -> str | None:
+    """The latest revision id defined in ``alembic/versions`` (the target of an
+    ``upgrade head``). Returns None if the revision history cannot be read."""
+    try:
+        return ScriptDirectory.from_config(_config()).get_current_head()
+    except Exception:
+        return None

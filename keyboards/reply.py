@@ -13,8 +13,14 @@ def get_main_menu() -> ReplyKeyboardMarkup:
             KeyboardButton(text="📝 Домашнее задание")
         ],
         [
+            KeyboardButton(text="🎯 Доп. занятия")
+        ],
+        [
             KeyboardButton(text="⏰ Напоминания"),
             KeyboardButton(text="⚙️ Настройки")
+        ],
+        [
+            KeyboardButton(text="❓ Помощь")
         ]
     ]
     return ReplyKeyboardMarkup(

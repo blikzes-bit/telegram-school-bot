@@ -14,6 +14,7 @@ from database.db import (
 )
 from services.scheduler import send_schedule_reminder, _send_reminder
 from config import TIMEZONE
+from utils import split_message
 
 CHAT_ID = 600001
 tz = pytz.timezone(TIMEZONE)
@@ -57,10 +58,17 @@ async def test_schedule_reminder_sends_when_overlap_exists(db, fake_bot):
 
 async def test_partial_multipart_failure_resumes_without_resending(db):
     """
-    A long reminder split into 3 chunks fails on chunk 2. On retry, chunk 1
-    (already delivered) must NOT be sent again — only chunks 2 and 3.
+    A long reminder split into several chunks fails partway. After a
+    "restart" (the crashed run's claim goes stale), a later attempt reclaims
+    the job and delivers ONLY the not-yet-sent chunks — no chunk is sent twice.
+
+    A fresh in-progress claim (same instant) is intentionally treated as
+    ``busy`` so two live bot copies can't both send; resumption only happens
+    once the previous claim is stale (a crashed/restarted run).
     """
+    from sqlalchemy import update
     from tests.conftest import FakeBot, FakeTelegramError
+    from database.models import ReminderJob
 
     await get_or_create_chat(CHAT_ID, "private")
     long_text = "\n\n".join(f"Block {i}" * 500 for i in range(3))
@@ -71,17 +79,32 @@ async def test_partial_multipart_failure_resumes_without_resending(db):
     first_attempt_sent = len(bot.sent)
     assert first_attempt_sent >= 1
 
-    # Retry: the FakeBot's fail_sequence is exhausted, so this attempt would
-    # succeed for any chunk it's asked to send. The already-sent chunk(s)
-    # from the first attempt must not be sent again.
+    # A second immediate attempt must NOT resend: the job is freshly
+    # in-progress → treated as busy (another live run could own it).
+    busy = await _send_reminder(bot, CHAT_ID, "hw", datetime.date(2026, 1, 1), long_text)
+    assert busy is False
+    assert len(bot.sent) == first_attempt_sent  # nothing sent while "busy"
+
+    # Simulate a crash+restart: age the claim so it is considered stale, then
+    # a later tick reclaims and resumes from where it left off.
+    async with db() as session:
+        await session.execute(
+            update(ReminderJob)
+            .where(ReminderJob.chat_id == CHAT_ID)
+            .values(updated_at="2000-01-01T00:00:00+00:00")
+        )
+        await session.commit()
+
     bot.fail_sequence = None
     ok2 = await _send_reminder(bot, CHAT_ID, "hw", datetime.date(2026, 1, 1), long_text)
     assert ok2 is True
 
     # Every message actually delivered must be a distinct chunk of the text —
-    # no chunk should appear twice across both attempts.
+    # no chunk should appear twice across all attempts.
     texts = [t for _, t, _ in bot.sent]
     assert len(texts) == len(set(texts))
+    # All chunks eventually delivered.
+    assert len(texts) == len(split_message(long_text))
 
 
 async def test_telegram_retry_after_is_retried_once_then_succeeds(db):
