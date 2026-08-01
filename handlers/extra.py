@@ -39,6 +39,9 @@ from keyboards.reply import get_main_menu
 from middleware.access import require_admin, is_chat_admin
 import services.audit as audit
 import services.timeservice as ts
+from services.extra_activities import (  # noqa: F401  (re-exported)
+    activities_for_weekday, activities_on_date,
+)
 from utils import (
     html_escape, safe_edit_text, safe_callback_ints, next_occurrence,
     parse_activity_time, MAX_TITLE_LEN, MAX_LOCATION_LEN, MAX_NOTE_LEN,
@@ -86,39 +89,6 @@ def format_extra_activities_block(activities: List[ExtraActivity], with_date: bo
         return ""
     lines = [format_extra_activity_line(a, with_date) for a in activities]
     return "🎯 <b>Доп. занятия:</b>\n" + "\n".join(lines)
-
-
-def activities_on_date(activities: List[ExtraActivity], date: datetime.date) -> List[ExtraActivity]:
-    """Activities that apply on a concrete ``date`` (weekly by weekday + once by date)."""
-    weekday = date.weekday()
-    matched = [
-        a for a in activities
-        if (a.kind == "weekly" and a.day_of_week == weekday)
-        or (a.kind == "once" and a.activity_date == date)
-    ]
-    return sorted(matched, key=lambda a: a.start_time)
-
-
-def activities_for_weekday(
-    activities: List[ExtraActivity], day_of_week: int, today: datetime.date
-) -> List[ExtraActivity]:
-    """
-    Activities for a weekday view: all weekly ones on ``day_of_week`` plus any
-    upcoming (today-or-later) one-off activities whose date falls on that
-    weekday, so a dated activity still surfaces on the right day tab.
-    """
-    matched = []
-    for a in activities:
-        if a.kind == "weekly" and a.day_of_week == day_of_week:
-            matched.append(a)
-        elif (
-            a.kind == "once"
-            and a.activity_date is not None
-            and a.activity_date >= today
-            and a.activity_date.weekday() == day_of_week
-        ):
-            matched.append(a)
-    return sorted(matched, key=lambda a: a.start_time)
 
 
 def _sort_key(a: ExtraActivity):

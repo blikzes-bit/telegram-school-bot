@@ -155,6 +155,60 @@ docker run -d \
 
 ---
 
+## 🌐 Веб-версия (Mini App)
+
+Помимо бота есть защищённое **Telegram Mini App** — веб-интерфейс поверх той
+же базы и той же доменной логики (расписание, доп. занятия). На первом этапе
+он **только для чтения**: авторизация → выбор класса → экраны «Сегодня»,
+«Расписание», «Домашние задания», «Доп. занятия». Подробности —
+[`docs/WEB_APP_ARCHITECTURE.md`](docs/WEB_APP_ARCHITECTURE.md).
+
+**Как открыть:** в чате класса выполните команду `/web` — бот проверит, что
+вы участник группы, выдаст одноразовую ссылку и кнопку для запуска Mini App.
+Открыть приложение для произвольного `chat_id` нельзя.
+
+### Запуск локально
+
+Бэкенд (FastAPI):
+
+```bash
+pip install -r requirements-dev.txt          # прод + web + инструменты тестов
+export BOT_TOKEN=...                          # PowerShell: $env:BOT_TOKEN="..."
+uvicorn web_api.main:app --reload --port 8000
+```
+
+Фронтенд (React + Vite):
+
+```bash
+cd web
+npm install
+npm run dev          # http://localhost:5173, проксирует /api на :8000
+```
+
+Всё сразу в Docker (только для разработки, не заменяет продакшн-образ бота):
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+# затем открыть http://localhost:5173
+```
+
+### Проверки фронтенда
+
+```bash
+cd web
+npm run typecheck    # проверка типов TypeScript
+npm run lint         # ESLint
+npm run test         # unit-тесты (vitest)
+npm run build        # production-сборка
+```
+
+> **Ограничение этапа 1.** Бот и API используют один SQLite-файл — это
+> рассчитано на **один хост и небольшую нагрузку**. Переход на PostgreSQL,
+> запись данных (CRUD) и полноценный RBAC запланированы на этап 2
+> (см. `docs/WEB_APP_ARCHITECTURE.md`).
+
+---
+
 ## 🗃️ Миграции БД
 
 Схема версионируется через **Alembic** (`alembic/`) вместо ручных `ALTER TABLE`. При обычном запуске `bot.py` сам вызывает `alembic upgrade head` — никаких дополнительных действий не требуется для новой установки.

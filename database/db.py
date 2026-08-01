@@ -1,12 +1,13 @@
 import datetime
 from collections import defaultdict
 from typing import List, Dict, Optional, Tuple
-from sqlalchemy import select, update, delete, event, func, text
+from sqlalchemy import select, update, delete, event, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from database.models import (
     Base, Chat, LessonSlot, Schedule, Homework, ReminderJob, ExtraActivity,
     DayOverride, LessonOverride, AuditLog, HomeworkAttachment,
+    WebUser, ChatMembership, WebLaunchToken, WebSession,
 )
 from config import DATABASE_URL
 
@@ -66,6 +67,7 @@ async def init_db():
             conn, "chats", "timezone",
             f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TIMEZONE}'",
         )
+        await _ensure_column(conn, "chats", "title", "VARCHAR")
         # Authorship columns; NULL for every pre-existing row by design.
         for table in ("homework", "extra_activities", "day_overrides", "lesson_overrides"):
             await _ensure_column(conn, table, "created_by_user_id", "BIGINT")
@@ -1758,3 +1760,319 @@ async def advance_reminder_job(job_id: int, chunks_sent: int, now_iso: str, done
 async def get_reminder_job_chunks(job: ReminderJob) -> List[str]:
     import json
     return json.loads(job.chunks_json)
+
+
+# ---------------------------------------------------------------------------
+# Web / Telegram Mini App persistence
+#
+# All timestamps are ISO-8601 UTC strings supplied by the caller
+# (services.timeservice.now_iso_utc), keeping this layer clock-free and easy to
+# test. Launch tokens and sessions are stored only as sha256 hashes.
+# ---------------------------------------------------------------------------
+
+
+async def upsert_web_user(
+    telegram_user_id: int, display_name: Optional[str], now_iso: str
+) -> WebUser:
+    """Create the WebUser for this Telegram id, or refresh its display name."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WebUser).where(WebUser.telegram_user_id == telegram_user_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            user = WebUser(
+                telegram_user_id=telegram_user_id,
+                display_name=display_name,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            session.add(user)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                result = await session.execute(
+                    select(WebUser).where(WebUser.telegram_user_id == telegram_user_id)
+                )
+                user = result.scalar_one()
+            else:
+                await session.refresh(user)
+                return user
+        # Existing row: keep the freshest display name.
+        user.display_name = display_name
+        user.updated_at = now_iso
+        await session.commit()
+        await session.refresh(user)
+        return user
+
+
+async def get_web_user(telegram_user_id: int) -> Optional[WebUser]:
+    """Read a WebUser by Telegram id (None if they never authenticated)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WebUser).where(WebUser.telegram_user_id == telegram_user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def upsert_membership(
+    chat_id: int, user_id: int, role: str, now_iso: str
+) -> ChatMembership:
+    """Record (or re-verify) that ``user_id`` belongs to ``chat_id``.
+
+    ``role`` is refreshed on every call so an admin who is later demoted (or
+    promoted) is reflected the next time membership is verified.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .where(ChatMembership.user_id == user_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = ChatMembership(
+                chat_id=chat_id,
+                user_id=user_id,
+                role=role,
+                last_verified_at=now_iso,
+                created_at=now_iso,
+            )
+            session.add(row)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                result = await session.execute(
+                    select(ChatMembership)
+                    .where(ChatMembership.chat_id == chat_id)
+                    .where(ChatMembership.user_id == user_id)
+                )
+                row = result.scalar_one()
+            else:
+                await session.refresh(row)
+                return row
+        row.role = role
+        row.last_verified_at = now_iso
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def touch_membership(
+    chat_id: int, user_id: int, now_iso: str, default_role: str = "member"
+) -> ChatMembership:
+    """Re-verify a membership from the web side without changing its role.
+
+    The bot is the authority on role (it can call Telegram's get_chat_member);
+    the web login only refreshes ``last_verified_at``. If no row exists yet it is
+    created with ``default_role`` so a direct launch link still works.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .where(ChatMembership.user_id == user_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = ChatMembership(
+                chat_id=chat_id,
+                user_id=user_id,
+                role=default_role,
+                last_verified_at=now_iso,
+                created_at=now_iso,
+            )
+            session.add(row)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                result = await session.execute(
+                    select(ChatMembership)
+                    .where(ChatMembership.chat_id == chat_id)
+                    .where(ChatMembership.user_id == user_id)
+                )
+                row = result.scalar_one()
+            else:
+                await session.refresh(row)
+                return row
+        row.last_verified_at = now_iso
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def get_membership(chat_id: int, user_id: int) -> Optional[ChatMembership]:
+    """The membership row for this user in this chat, or None (→ 403)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .where(ChatMembership.user_id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_memberships_for_user(user_id: int) -> List[ChatMembership]:
+    """Every chat this user may see, newest verification first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatMembership)
+            .where(ChatMembership.user_id == user_id)
+            .order_by(ChatMembership.chat_id)
+        )
+        return list(result.scalars().all())
+
+
+async def get_chats_by_ids(chat_ids: List[int]) -> Dict[int, Chat]:
+    """Fetch several chats at once, keyed by id (for the class picker)."""
+    if not chat_ids:
+        return {}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Chat).where(Chat.chat_id.in_(chat_ids))
+        )
+        return {chat.chat_id: chat for chat in result.scalars().all()}
+
+
+async def create_launch_token(
+    token_hash: str,
+    telegram_user_id: int,
+    chat_id: int,
+    now_iso: str,
+    expires_iso: str,
+) -> WebLaunchToken:
+    """Persist a single-use launch token (hash only)."""
+    async with AsyncSessionLocal() as session:
+        token = WebLaunchToken(
+            token_hash=token_hash,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            created_at=now_iso,
+            expires_at=expires_iso,
+        )
+        session.add(token)
+        await session.commit()
+        await session.refresh(token)
+        return token
+
+
+async def consume_launch_token(token_hash: str, now_iso: str) -> Optional[WebLaunchToken]:
+    """Atomically claim an unused launch token.
+
+    The UPDATE ... WHERE used_at IS NULL is the single-use guarantee: a second
+    concurrent (or later) attempt updates zero rows and gets ``None``. Expiry is
+    validated by the caller against the returned row, so an expired token is
+    rejected (its consumption is harmless).
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(WebLaunchToken)
+            .where(WebLaunchToken.token_hash == token_hash)
+            .where(WebLaunchToken.used_at.is_(None))
+            .values(used_at=now_iso)
+        )
+        await session.commit()
+        if result.rowcount != 1:
+            return None
+        row = await session.execute(
+            select(WebLaunchToken).where(WebLaunchToken.token_hash == token_hash)
+        )
+        return row.scalar_one_or_none()
+
+
+async def create_web_session(
+    session_hash: str, user_id: int, now_iso: str, expires_iso: str
+) -> WebSession:
+    """Persist an opaque web session (hash only)."""
+    async with AsyncSessionLocal() as db_session:
+        row = WebSession(
+            session_hash=session_hash,
+            user_id=user_id,
+            created_at=now_iso,
+            expires_at=expires_iso,
+            last_seen_at=now_iso,
+        )
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+        return row
+
+
+async def get_web_session(session_hash: str) -> Optional[WebSession]:
+    """The session row for this hash (expiry is checked by the caller)."""
+    async with AsyncSessionLocal() as db_session:
+        result = await db_session.execute(
+            select(WebSession).where(WebSession.session_hash == session_hash)
+        )
+        return result.scalar_one_or_none()
+
+
+async def touch_web_session(session_hash: str, now_iso: str) -> None:
+    """Update a session's last-seen stamp (best effort)."""
+    async with AsyncSessionLocal() as db_session:
+        await db_session.execute(
+            update(WebSession)
+            .where(WebSession.session_hash == session_hash)
+            .values(last_seen_at=now_iso)
+        )
+        await db_session.commit()
+
+
+async def delete_web_session(session_hash: str) -> None:
+    """Invalidate a session (logout)."""
+    async with AsyncSessionLocal() as db_session:
+        await db_session.execute(
+            delete(WebSession).where(WebSession.session_hash == session_hash)
+        )
+        await db_session.commit()
+
+
+async def refresh_web_session(
+    session_hash: str, last_seen_iso: str, expires_iso: str
+) -> None:
+    """Slide a session forward: bump last-seen and extend expiry (best effort)."""
+    async with AsyncSessionLocal() as db_session:
+        await db_session.execute(
+            update(WebSession)
+            .where(WebSession.session_hash == session_hash)
+            .values(last_seen_at=last_seen_iso, expires_at=expires_iso)
+        )
+        await db_session.commit()
+
+
+async def delete_web_sessions_for_user(user_id: int) -> int:
+    """Invalidate every session of a user ("log out everywhere"). Returns count."""
+    async with AsyncSessionLocal() as db_session:
+        result = await db_session.execute(
+            delete(WebSession).where(WebSession.user_id == user_id)
+        )
+        await db_session.commit()
+        return int(result.rowcount or 0)
+
+async def cleanup_expired_web_auth(before_iso: str) -> int:
+    """Delete stale Mini App auth rows so they don't accumulate.
+
+    Removes web sessions whose ``expires_at`` is before ``before_iso`` and
+    launch tokens that are either already used or expired. Timestamps are a
+    fixed ISO-8601 UTC format, so the string comparison is chronological.
+    Returns the total number of rows removed. Never used for anything a
+    request depends on — it is best-effort hygiene called from the nightly
+    housekeeping.
+    """
+    async with AsyncSessionLocal() as session:
+        sessions = await session.execute(
+            delete(WebSession).where(WebSession.expires_at < before_iso)
+        )
+        tokens = await session.execute(
+            delete(WebLaunchToken).where(
+                or_(
+                    WebLaunchToken.used_at.is_not(None),
+                    WebLaunchToken.expires_at < before_iso,
+                )
+            )
+        )
+        await session.commit()
+        return int(sessions.rowcount or 0) + int(tokens.rowcount or 0)

@@ -102,6 +102,33 @@ async def can_edit_homework(bot: Any, chat: Any, homework: Any, user_id: Optiona
     return await is_chat_admin(bot, chat.chat_id, user_id, chat_type)
 
 
+def can_edit_homework_sync(
+    *,
+    is_private: bool,
+    is_admin: bool,
+    policy: Optional[str],
+    author_id: Optional[int],
+    user_id: Optional[int],
+) -> bool:
+    """
+    Telegram-API-free variant of :func:`can_edit_homework` for callers (the web
+    API) that already know ``is_admin`` from a verified ``ChatMembership`` role
+    instead of calling ``getChatMember``. Mirrors the exact same policy for an
+    *existing* homework entry (not the "may add" case, which is unrestricted).
+    """
+    if is_private:
+        return True
+    policy = normalize_policy(policy)
+    if policy == POLICY_COLLABORATIVE:
+        return True
+    if policy == POLICY_CREATOR_OR_ADMIN:
+        if author_id is None:
+            return True
+        if user_id is not None and author_id == user_id:
+            return True
+    return is_admin
+
+
 async def require_homework_access(event: Any, chat: Any, homework: Any) -> bool:
     """
     Guard for a mutating homework handler: returns True when the action may

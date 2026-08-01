@@ -16,7 +16,7 @@ from database.db import (
     update_last_hw_reminder_date, update_last_sch_reminder_date,
     update_last_duetoday_reminder_date, update_last_changes_reminder_date,
     claim_reminder_job, advance_reminder_job, get_reminder_job_chunks,
-    cleanup_old_reminder_jobs, cleanup_old_audit_logs,
+    cleanup_old_reminder_jobs, cleanup_old_audit_logs, cleanup_expired_web_auth,
     set_chat_blocked, get_incomplete_homework_for_chats, get_schedule_for_chats,
     get_lesson_slots_for_chats, get_extra_activities, get_extra_activities_for_chats,
     get_day_overrides_for_chats, get_lesson_overrides_for_chats,
@@ -416,6 +416,14 @@ async def _nightly_housekeeping():
             logger.info("Pruned %s old reminder jobs.", removed)
     except Exception as e:
         logger.warning("Reminder-job cleanup failed: %s", e)
+    try:
+        # Expired/consumed Mini App launch tokens and sessions never serve a
+        # request again, so drop them to keep the auth tables bounded.
+        removed = await cleanup_expired_web_auth(utc_now.isoformat())
+        if removed:
+            logger.info("Pruned %s expired web-auth rows.", removed)
+    except Exception as e:
+        logger.warning("Web-auth cleanup failed: %s", e)
     await prune_audit_log()
 
 

@@ -92,6 +92,10 @@ class Chat(Base):
     # global default) so one bad value can never stop the scheduler.
     timezone = Column(String, default=DEFAULT_TIMEZONE, nullable=False)
 
+    # Human-readable class name shown in the Mini App class picker.
+    # Nullable so every pre-existing chat keeps working with no name set.
+    title = Column(String, nullable=True)
+
     # Relationships
     lesson_slots = relationship("LessonSlot", back_populates="chat", cascade="all, delete-orphan")
     schedules = relationship("Schedule", back_populates="chat", cascade="all, delete-orphan")
@@ -421,3 +425,103 @@ class FSMStateRow(Base):
     key = Column(String, primary_key=True)
     state = Column(String, nullable=True)
     data = Column(Text, nullable=False, default="{}")
+
+
+# ---------------------------------------------------------------------------
+# Web / Telegram Mini App models
+#
+# These back the read-only Mini App (see web_api/). They store the bare minimum
+# needed to authenticate a Telegram user and scope every request to the chats
+# they actually belong to: only a Telegram id + display name are kept — never a
+# username, phone number, token or raw Update payload (mirrors the audit/
+# authorship privacy rule). Every timestamp is an ISO-8601 UTC string, the same
+# convention used by AuthorshipMixin / ReminderJob, so values stay comparable
+# across instances and timezones.
+# ---------------------------------------------------------------------------
+
+
+class WebUser(Base):
+    """A Telegram user who has authenticated to the Mini App at least once."""
+
+    __tablename__ = "web_users"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", name="uq_web_users_tg_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id = Column(BigInteger, nullable=False)
+    display_name = Column(String, nullable=True)
+    created_at = Column(String, nullable=False)  # ISO-8601 UTC
+    updated_at = Column(String, nullable=False)  # ISO-8601 UTC
+
+
+class ChatMembership(Base):
+    """Which chats (classes) a web user may see, and with what role.
+
+    A row exists only for a membership the bot has verified server-side (the
+    user issued ``/web`` inside that group, or opened a launch link bound to it).
+    The Mini App refuses any chat_id without a matching row here — an unknown or
+    unverified chat_id yields 403, never an empty result.
+    """
+
+    __tablename__ = "chat_memberships"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_chat_memberships_chat_user"),
+        CheckConstraint("role IN ('member', 'admin')", name="ck_chat_memberships_role"),
+        Index("ix_chat_memberships_user", "user_id"),
+        Index("ix_chat_memberships_chat", "chat_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(BigInteger, nullable=False)  # Telegram user id
+    role = Column(String, nullable=False, default="member")  # member|admin
+    last_verified_at = Column(String, nullable=False)  # ISO-8601 UTC
+    created_at = Column(String, nullable=False)        # ISO-8601 UTC
+
+
+class WebLaunchToken(Base):
+    """A single-use, short-lived token that bootstraps a Mini App session.
+
+    Minted by the bot's ``/web`` command after verifying the caller's group
+    membership. Only the *hash* of the random token is stored (never the token
+    itself); it is bound to one ``telegram_user_id`` + ``chat_id``, expires after
+    a few minutes and may be consumed exactly once.
+    """
+
+    __tablename__ = "web_launch_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_web_launch_tokens_hash"),
+        Index("ix_web_launch_tokens_hash", "token_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token_hash = Column(String, nullable=False)  # sha256 hex of the raw token
+    telegram_user_id = Column(BigInteger, nullable=False)
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(String, nullable=False)  # ISO-8601 UTC
+    expires_at = Column(String, nullable=False)  # ISO-8601 UTC
+    used_at = Column(String, nullable=True)      # ISO-8601 UTC, set on consume
+
+
+class WebSession(Base):
+    """An opaque, cookie-backed web session.
+
+    The cookie carries only a random token; this table stores its ``sha256``
+    hash, the owning Telegram user id, and an expiry. Nothing about the token is
+    recoverable from the database.
+    """
+
+    __tablename__ = "web_sessions"
+    __table_args__ = (
+        UniqueConstraint("session_hash", name="uq_web_sessions_hash"),
+        Index("ix_web_sessions_hash", "session_hash"),
+        Index("ix_web_sessions_user", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_hash = Column(String, nullable=False)  # sha256 hex of the cookie token
+    user_id = Column(BigInteger, nullable=False)   # Telegram user id
+    created_at = Column(String, nullable=False)    # ISO-8601 UTC
+    expires_at = Column(String, nullable=False)    # ISO-8601 UTC
+    last_seen_at = Column(String, nullable=True)   # ISO-8601 UTC

@@ -1,0 +1,27 @@
+# Development image for the Mini App backend (FastAPI).
+#
+# This is SEPARATE from the production bot image (./Dockerfile), which stays
+# bot-only. Used by docker-compose.dev.yml to run the API next to the bot for
+# local development. Not intended for production hosting yet (see
+# docs/WEB_APP_ARCHITECTURE.md — SQLite single-host limitation).
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    APP_ENV=development \
+    DATABASE_URL=sqlite+aiosqlite:////data/school_bot.db
+
+WORKDIR /app
+
+COPY requirements.txt requirements-web.txt ./
+RUN pip install -r requirements.txt -r requirements-web.txt
+
+COPY . .
+
+RUN mkdir -p /data
+
+EXPOSE 8000
+
+# Reload for a smooth dev loop; the API reads the same DB the bot writes.
+CMD ["uvicorn", "web_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

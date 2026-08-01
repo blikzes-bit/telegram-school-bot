@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
-from config import BOT_TOKEN, FSM_STORAGE
+from config import FSM_STORAGE, require_bot_token
 from database.migrate import run_migrations
 from services.scheduler import setup_scheduler
 from middleware.access import ChatContextMiddleware, OnboardingGuardMiddleware
@@ -13,7 +13,7 @@ from middleware.access import ChatContextMiddleware, OnboardingGuardMiddleware
 # Import routers
 from handlers import (
     common, onboarding, today, schedule, homework, settings, migration, extra,
-    date_overrides, history, data_backup, status,
+    date_overrides, history, data_backup, status, web,
 )
 
 # Configure logging
@@ -41,6 +41,7 @@ BOT_COMMANDS = [
     BotCommand(command="schedule", description="📅 Расписание"),
     BotCommand(command="homework", description="📝 Домашнее задание"),
     BotCommand(command="extra", description="🎯 Доп. занятия"),
+    BotCommand(command="web", description="🌐 Приложение"),
     BotCommand(command="settings", description="⚙️ Настройки"),
     BotCommand(command="help", description="❓ Помощь"),
 ]
@@ -83,7 +84,7 @@ async def main():
     await run_migrations()
 
     # Initialize Bot and Dispatcher
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(token=require_bot_token())
     dp = Dispatcher(storage=_build_storage())
 
     dp.update.outer_middleware(ChatContextMiddleware())
@@ -106,6 +107,7 @@ async def main():
     dp.include_router(common.router)
     dp.include_router(migration.router)
     dp.include_router(status.router)
+    dp.include_router(web.router)
     dp.include_router(onboarding.router)
     dp.include_router(today.router)
     dp.include_router(schedule.router)
