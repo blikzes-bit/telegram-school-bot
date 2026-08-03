@@ -17,6 +17,14 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    # Until the Mini App the database file had a single writer (the bot). The
+    # web API is a second process writing to it — sessions, launch tokens and
+    # homework edits — so the default rollback journal would make readers and
+    # the writer block each other and surface as "database is locked".
+    # WAL lets readers run against a snapshot while a write is in flight, and
+    # busy_timeout makes the short remaining overlaps wait instead of failing.
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
