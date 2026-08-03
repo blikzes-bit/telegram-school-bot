@@ -1,6 +1,7 @@
 # 🎓 Telegram School Bot
 
-![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14-blue?logo=python&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
 ![Aiogram](https://img.shields.io/badge/Aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-multi--arch-2496ED?logo=docker&logoColor=white)
@@ -115,14 +116,11 @@ telegram-school-bot/
 git clone https://github.com/blikzes-bit/telegram-school-bot.git
 cd telegram-school-bot
 
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
-
-pip install -r requirements-dev.txt   # прод + тесты/линт/типы
+uv sync --all-extras --dev    # окружение по pyproject.toml + uv.lock
 
 cp .env.example .env          # укажи свой BOT_TOKEN
 
-python bot.py
+uv run python bot.py
 ```
 
 При старте `bot.py` сам прогоняет `alembic upgrade head`, поднимая схему БД до актуальной версии (см. раздел «Миграции БД» ниже).
@@ -172,9 +170,9 @@ docker run -d \
 Бэкенд (FastAPI):
 
 ```bash
-pip install -r requirements-dev.txt          # прод + web + инструменты тестов
+uv sync --all-extras --dev                    # прод + web + инструменты тестов
 export BOT_TOKEN=...                          # PowerShell: $env:BOT_TOKEN="..."
-uvicorn web_api.main:app --reload --port 8000
+uv run uvicorn web_api.main:app --reload --port 8000
 ```
 
 Фронтенд (React + Vite):
@@ -259,11 +257,11 @@ docker compose up -d --build   # пересобрать и перезапуст�
 ## 🧪 Тесты и качество кода
 
 ```bash
-pytest                                  # полный набор тестов
-pytest --cov=. --cov-report=term-missing  # с покрытием
-ruff check .                            # линт
-mypy .                                  # проверка типов
-pip-audit -r requirements.txt           # аудит зависимостей на уязвимости
+uv run pytest                              # полный набор тестов
+uv run pytest --cov=. --cov-report=term-missing  # с покрытием
+uv run ruff check .                        # линт
+uv run mypy .                              # проверка типов
+uv audit --frozen --no-dev                 # аудит зависимостей на уязвимости
 ```
 
 Тесты покрывают: часовой пояс каждого чата (Europe/Kyiv, UTC, America/New_York, разные календарные даты у чатов в один и тот же момент, переходы летнего времени — несуществующее и повторяющееся локальное время, отсутствие двойного напоминания, неизвестная зона не ломает планировщик), вложения ДЗ (FSM добавления, несколько файлов, лимит и дубликаты, удаление с подтверждением, каскад при удалении ДЗ, изоляция по `chat_id`, права, недоверенное имя файла, ошибки Telegram API на «мёртвом» `file_id`), работу с БД и конкурентный `get_or_create_chat`, атомарность онбординга и переконфигурации, поведение до `/start` и после полного сброса, права доступа участник/админ в группе, все три режима прав на ДЗ (админ / автор / другой участник, включая старые записи с `NULL`-авторством), авторство и журнал аудита (в том числе то, что удалённая запись оставляет строку истории, а журнал изолирован по `chat_id` и экранирует HTML), безопасный HTML-рендеринг, устаревшие/битые callback-кнопки, edge-cases дат (29 февраля, просроченные быстрые кнопки), outbox-доставку напоминаний (частичный сбой, `RetryAfter`, `Forbidden`) и миграцию group → supergroup. GitHub Actions прогоняет полный CI (лint + типы + тесты + аудит) на каждый pull request, а тесты — перед публикацией Docker-образа.

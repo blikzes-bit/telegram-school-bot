@@ -4,18 +4,22 @@
 # bot-only. Used by docker-compose.dev.yml to run the API next to the bot for
 # local development. Not intended for production hosting yet (see
 # docs/WEB_APP_ARCHITECTURE.md — SQLite single-host limitation).
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
     APP_ENV=development \
-    DATABASE_URL=sqlite+aiosqlite:////data/school_bot.db
+    DATABASE_URL=sqlite+aiosqlite:////data/school_bot.db \
+    PATH="/app/.venv/bin:$PATH"
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.31 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY requirements.txt requirements-web.txt ./
-RUN pip install -r requirements.txt -r requirements-web.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project --extra web
 
 COPY . .
 

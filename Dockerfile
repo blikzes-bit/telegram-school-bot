@@ -1,26 +1,33 @@
 # --- Builder: install production dependencies only ---
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.31 /uv /usr/local/bin/uv
 
-ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --prefix=/install -r requirements.txt
+# Only the lock and the manifest, so the dependency layer is reused whenever
+# application code changes. --frozen fails the build if they disagree, rather
+# than silently resolving something the lockfile never pinned.
+COPY pyproject.toml uv.lock ./
+# The `web` extra is included ahead of the image gaining its `web` role, so the
+# dependency layer does not have to be rebuilt for it a commit later.
+RUN uv sync --frozen --no-dev --no-install-project --extra web
 
 # --- Final image: no build tools, no tests, non-root ---
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DATABASE_URL=sqlite+aiosqlite:////data/school_bot.db \
-    HEARTBEAT_FILE=/data/.heartbeat
+    HEARTBEAT_FILE=/data/.heartbeat \
+    PATH="/app/.venv/bin:$PATH"
 
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid appuser --shell /bin/false --create-home appuser
 
-COPY --from=builder /install /usr/local
+COPY --from=builder /app/.venv /app/.venv
 
 WORKDIR /app
 COPY bot.py config.py utils.py alembic.ini ./

@@ -1,7 +1,0 @@
-# Web API (FastAPI) production dependencies for the Telegram Mini App backend.
-#
-# Installed *in addition to* requirements.txt when running the API component.
-# Deliberately kept out of the bot-only Docker image (Dockerfile), which must
-# stay minimal. Pinned to exact versions for reproducible builds.
-fastapi==0.141.1
-uvicorn==0.52.0

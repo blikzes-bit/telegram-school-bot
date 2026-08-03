@@ -11,8 +11,13 @@ __pycache__/
 .venv
 venv/
 README.md
+docs/
 tests/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .idea/
-requirements-dev.txt
-mypy.ini
+# Node modules and any local build are rebuilt inside the image; copying them
+# in would both bloat the context and risk shipping a stale bundle.
+web/node_modules/
+web/dist/

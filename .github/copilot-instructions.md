@@ -1,24 +1,26 @@
 # Copilot instructions for telegram-school-bot
 
-Telegram bot for a school class (Python 3.12 + aiogram 3, async). A class configures
+Telegram bot for a school class (Python 3.14 + aiogram 3, async). A class configures
 its lesson schedule and bell times once; the bot then reminds about homework and
 upcoming lessons in the chat.
 
 ## Commands
 
-Install dev tooling (prod + tests/lint/types): `pip install -r requirements-dev.txt`
-(`requirements.txt` is prod-only and must never leak into the Docker image).
+Dependencies, tool config and the Python version all live in `pyproject.toml`
+(+ `uv.lock`, `.python-version`). Install everything: `uv sync --all-extras --dev`.
+The `dev` group is test/lint tooling and must never reach the Docker image; the
+`web` extra is the Mini App API's FastAPI stack.
 
-- Full test suite: `pytest` (config in `pytest.ini`: `asyncio_mode=auto`, `testpaths=tests`)
-- Single test file: `pytest tests/test_chat_timezone.py`
-- Single test by name: `pytest tests/test_db_flow.py -k reonboarding -v`
-- Coverage: `pytest --cov=. --cov-report=term-missing`
-- Lint: `ruff check .`
-- Type-check: `mypy .` (see `mypy.ini` — several SQLAlchemy/aiogram error codes are
-  intentionally disabled to cut framework false positives; do not re-enable them casually)
-- Dependency audit: `pip-audit -r requirements.txt`
+- Full test suite: `uv run pytest` (`[tool.pytest.ini_options]`: `asyncio_mode=auto`, `testpaths=tests`)
+- Single test file: `uv run pytest tests/test_chat_timezone.py`
+- Single test by name: `uv run pytest tests/test_db_flow.py -k reonboarding -v`
+- Coverage: `uv run pytest --cov=. --cov-report=term-missing`
+- Lint: `uv run ruff check .`
+- Type-check: `uv run mypy .` (see `[tool.mypy]` — several SQLAlchemy/aiogram error codes
+  are intentionally disabled to cut framework false positives; do not re-enable them casually)
+- Dependency audit: `uv audit --frozen --no-dev`
 
-CI (`.github/workflows/ci.yml`) runs ruff + mypy + pytest (coverage) + pip-audit on every
+CI (`.github/workflows/ci.yml`) runs ruff + mypy + pytest (coverage) + `uv audit` on every
 PR. Keep all four green.
 
 ## Architecture (big picture)
