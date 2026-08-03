@@ -30,6 +30,10 @@ COPY keyboards ./keyboards
 COPY services ./services
 COPY middleware ./middleware
 COPY alembic ./alembic
+# handlers/web.py (the /web command) mints launch tokens via web_api.security /
+# web_api.settings, so the bot image needs them even though it never serves the
+# API. Both modules are stdlib-only — no FastAPI in this image.
+COPY web_api ./web_api
 
 RUN mkdir -p /data && chown -R appuser:appuser /app /data
 
