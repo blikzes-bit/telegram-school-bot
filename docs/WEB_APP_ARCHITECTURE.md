@@ -94,7 +94,13 @@ Guarantees (all enforced **server-side**, before any tenant data is touched):
    used_at IS NULL`), **10-minute TTL**, and **bound to (telegram_user_id,
    chat_id)**. A token presented by another user → `403`.
 4. **Membership is verified before a token is issued** (the caller ran `/web`
-   from inside the chat; their admin/member role is read from Telegram).
+   from inside the chat; their admin/member role is read from Telegram), and
+   that verification **expires**. Only the bot can ask Telegram whether someone
+   is still in a chat, so `ChatMembership.last_verified_at` is treated as an
+   ageing vouch: past `MEMBERSHIP_MAX_AGE` the class endpoints return `403`
+   until the user runs `/web` again. Without it, someone removed from the class
+   — or demoted from admin — would keep web access indefinitely, because
+   sessions slide forward on every request.
 5. **Opaque sessions.** The cookie holds only a random token; the DB stores only
    its hash. Cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` in production.
 6. **Minimal PII.** Only Telegram id + display name are stored — never username,
@@ -178,6 +184,7 @@ New settings (see `.env.example`), read once into a typed `web_api/settings.py`
 | `WEB_ALLOWED_ORIGINS` | `http://localhost:5173` | CORS allow-list (credentialed). |
 | `AUTH_RATE_LIMIT` | `20` | Max `/auth/telegram` attempts per IP per window (`0` disables). |
 | `AUTH_RATE_WINDOW` | `60` | Rate-limit window in seconds. |
+| `MEMBERSHIP_MAX_AGE` | `2592000` | How long a verified membership lasts without a `/web` re-run, in seconds (30 days). `0` disables expiry. |
 
 `BOT_TOKEN` is validated **lazily** (`config.require_bot_token()`) only when the
 bot or web-auth actually needs it — importing the models/API no longer requires

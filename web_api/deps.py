@@ -131,20 +131,50 @@ class ClassContext:
     permissions: PermissionsDTO
 
 
+def _membership_is_stale(
+    last_verified_at: Optional[str], max_age_seconds: int, now: datetime.datetime
+) -> bool:
+    """Whether a membership must be re-confirmed through ``/web`` before use.
+
+    Only the bot can ask Telegram whether someone is still in a chat, so the API
+    treats ``last_verified_at`` as an expiring vouch rather than a permanent
+    grant — otherwise someone removed from the class keeps their access forever.
+    An unparseable timestamp counts as stale: this is an access-control gate, and
+    re-running ``/web`` repairs it.
+    """
+    if max_age_seconds <= 0:  # explicitly disabled
+        return False
+    verified = _parse_iso(last_verified_at)
+    if verified is None:
+        return True
+    return (now - verified).total_seconds() > max_age_seconds
+
+
 async def require_class(
     chat_id: int,
     user: WebUser = Depends(get_current_user),
+    settings: WebSettings = Depends(get_web_settings),
 ) -> ClassContext:
     """Authorise access to a class by chat_id, or 403.
 
     Membership is the single gate: without a verified ``ChatMembership`` row the
     request is refused, so no tenant's data can be reached by guessing a chat_id.
+    A membership that has not been re-verified recently is refused as well.
     """
     membership = await db.get_membership(chat_id, user.telegram_user_id)
     if membership is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="you do not have access to this class",
+        )
+    if _membership_is_stale(
+        membership.last_verified_at,
+        settings.membership_max_age_seconds,
+        datetime.datetime.now(datetime.timezone.utc),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="class access has expired, open the app again from the chat with /web",
         )
     chat = await db.get_chat(chat_id)
     permissions = build_permissions(chat, membership)
