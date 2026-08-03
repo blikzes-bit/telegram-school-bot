@@ -64,6 +64,50 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Build amd64 locally first and exercise the image before anything is
+      # published. pytest runs against the source tree, so it cannot catch a
+      # module the Dockerfile forgot to COPY — which is exactly how a release
+      # once shipped an image that died at startup on `import bot`. The second
+      # build below reuses these layers from the cache.
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: school-bot:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke — the bot role imports
+        run: docker run --rm -e BOT_TOKEN=1:dummy school-bot:smoke python -c "import bot"
+
+      - name: Smoke — migrations reach head
+        run: |
+          docker volume create smoke-data
+          docker run --rm -v smoke-data:/data school-bot:smoke migrate
+
+      - name: Smoke — the web role serves the API and the frontend
+        run: |
+          docker run -d --name smoke-web -v smoke-data:/data -p 8000:8000 \
+            -e BOT_TOKEN=1:dummy school-bot:smoke web
+          for _ in $(seq 1 30); do
+            curl -sf localhost:8000/api/v1/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf localhost:8000/api/v1/health
+          # A client-side route must return the SPA shell, not a 404.
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/classes/-1/today)" = "200"
+          # An unknown API path must stay a 404 rather than be masked by it.
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/nope)" = "404"
+
+      - name: Smoke — teardown
+        if: always()
+        run: |
+          docker logs smoke-web 2>&1 | tail -30 || true
+          docker rm -f smoke-web || true
+          docker volume rm -f smoke-data || true
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:

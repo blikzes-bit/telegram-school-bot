@@ -127,16 +127,39 @@ uv run python bot.py
 
 ### Docker
 
-Готовый мультиархитектурный образ (`amd64` + `arm64`) публикуется в GHCR при каждом пуше в `main`. Продакшн-образ собирается в два этапа (builder/final), не содержит тестов и dev-инструментов, запускается от непривилегированного пользователя и имеет встроенный `HEALTHCHECK`:
+Готовый мультиархитектурный образ (`amd64` + `arm64`) публикуется в GHCR при каждом пуше в `main`. Не содержит тестов, dev-инструментов и Node, запускается от непривилегированного пользователя.
+
+У образа **три роли**, задаются командой. Бот и API делят `database/models.py` и слой сервисов, поэтому едут одним тегом — так между ними не может возникнуть расхождения версий.
 
 ```bash
-docker run -d \
-  --name school-bot \
+# 1. Накатить миграции и выйти. Отдельным шагом, а не побочным эффектом
+#    старта бота, — после него бот и веб можно поднимать в любом порядке.
+docker run --rm -v school_bot_data:/data \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest migrate
+
+# 2. Бот
+docker run -d --name school-bot \
   -e BOT_TOKEN=your_token_here \
   -e TIMEZONE=Europe/Kiev \
   -v school_bot_data:/data \
-  ghcr.io/blikzes-bit/telegram-school-bot:latest
+  --health-cmd "python -c \"import os,sys,time; p=os.environ['HEARTBEAT_FILE']; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<150 else 1)\"" \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest bot
+
+# 3. Mini App: API и собранный фронтенд с одного origin
+docker run -d --name school-web \
+  -e BOT_TOKEN=your_token_here \
+  -e APP_ENV=production \
+  -e SESSION_SECRET=... \
+  -v school_bot_data:/data -p 8000:8000 \
+  --health-cmd "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health').status==200 else 1)\"" \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest web
 ```
+
+`HEALTHCHECK` не зашит в образ намеренно: роли проверяются по-разному (бот обновляет `HEARTBEAT_FILE`, API отвечает на `/api/v1/health`), а директива статическая — поэтому проверка задаётся на контейнере.
+
+За обратным прокси роли `web` нужен `FORWARDED_ALLOW_IPS` с адресом прокси, иначе ограничитель попыток входа увидит один и тот же IP у всех запросов и превратится в общий лимит на всех пользователей.
+
+**`SESSION_SECRET` должен совпадать у бота и у веба.** Бот хеширует им одноразовый токен запуска, API по этому же хешу его ищет — если значения разойдутся, вход будет молча падать с «launch token is invalid».
 
 База данных хранится в `/data/school_bot.db` — том нужен для сохранения данных между перезапусками контейнера.
 
@@ -148,7 +171,7 @@ docker run -d \
 | `TIMEZONE` | ❌ | `Europe/Kiev` | Часовой пояс **по умолчанию** для новых чатов (и запасной вариант, если у чата сохранён неизвестный пояс). Каждый чат может задать свой пояс в ⚙️ Настройках |
 | `DATABASE_URL` | ❌ | `sqlite+aiosqlite:///school_bot.db` | Строка подключения к БД (только SQLite) |
 | `FSM_STORAGE` | ❌ | `sqlite` | `sqlite` — персистентное хранилище состояний диалогов (переживает перезапуск), `memory` — только для локальной разработки |
-| `HEARTBEAT_FILE` | ❌ | `.heartbeat` | Файл, который планировщик обновляет каждую минуту; используется Docker `HEALTHCHECK` |
+| `HEARTBEAT_FILE` | ❌ | `.heartbeat` | Файл, который планировщик обновляет каждую минуту; по нему проверяется живость роли `bot` |
 | `AUDIT_RETENTION_DAYS` | ❌ | `180` | Сколько дней хранится история изменений; старые записи удаляются ночным обслуживанием. `0` — не удалять никогда |
 
 ---
