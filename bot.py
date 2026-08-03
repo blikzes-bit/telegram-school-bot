@@ -6,7 +6,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from config import FSM_STORAGE, require_bot_token
-from database.migrate import run_migrations
+from database.migrate import get_db_revision, get_script_head
 from services.scheduler import setup_scheduler
 from middleware.access import ChatContextMiddleware, OnboardingGuardMiddleware
 
@@ -77,11 +77,43 @@ async def _on_error(event, exception):
     return True
 
 
+class SchemaOutOfDate(RuntimeError):
+    """The database is not at the revision this code expects.
+
+    Its own type, not SystemExit: the entrypoint below deliberately treats
+    SystemExit as a clean manual stop, which would swallow this message and
+    exit 0 — telling an orchestrator everything went fine.
+    """
+
+
+async def check_schema() -> None:
+    """Refuse to start against a schema that is not at head.
+
+    Applying migrations is a separate step (``migrate``), not a side effect of
+    the bot starting, so the bot and the web API can come up in any order. The
+    cost of that split is a database nobody upgraded — which would otherwise
+    surface much later as an opaque "no such table" in the middle of a handler.
+    Failing here instead names the problem and the fix.
+    """
+    db_revision = await get_db_revision()
+    head = get_script_head()
+    if head is None:
+        logger.warning("Could not read the migration history; skipping schema check")
+        return
+    if db_revision == head:
+        return
+
+    where = f"at {db_revision}" if db_revision else "not initialised"
+    raise SchemaOutOfDate(
+        f"Database schema is {where}, but the code expects {head}.\n"
+        f"Apply the migrations first:\n"
+        f"    docker run --rm -v <data>:/data <image> migrate\n"
+        f"    # or, from a checkout: uv run alembic upgrade head"
+    )
+
+
 async def main():
-    # Bring the production schema up to date (Alembic migrations) instead of
-    # a bare create_all — see database/migrate.py.
-    logger.info("Running database migrations...")
-    await run_migrations()
+    await check_schema()
 
     # Initialize Bot and Dispatcher
     bot = Bot(token=require_bot_token())
@@ -137,5 +169,10 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+    except SchemaOutOfDate as exc:
+        # Non-zero on purpose: a container that exits 0 looks like a clean stop
+        # and will not be reported as a failed deploy.
+        logger.error("%s", exc)
+        sys.exit(1)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped manually.")

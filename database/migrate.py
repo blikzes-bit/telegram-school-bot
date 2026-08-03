@@ -34,6 +34,25 @@ async def run_migrations() -> None:
     await asyncio.to_thread(_upgrade_to_head)
 
 
+async def get_db_revision() -> str | None:
+    """The Alembic revision stamped in *this* database.
+
+    None when ``alembic_version`` is absent — either a brand-new database or a
+    dev one built by ``init_db`` rather than by migrations.
+    """
+    from sqlalchemy import text
+
+    import database.db as db
+
+    try:
+        async with db.AsyncSessionLocal() as session:
+            result = await session.execute(text("SELECT version_num FROM alembic_version"))
+            row = result.first()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
 def get_script_head() -> str | None:
     """The latest revision id defined in ``alembic/versions`` (the target of an
     ``upgrade head``). Returns None if the revision history cannot be read."""

@@ -6,6 +6,10 @@ upcoming lessons in the chat.
 
 ## Commands
 
+Migrations are an explicit step, never a side effect of startup: run
+`uv run alembic upgrade head` (or the image's `migrate` command). `bot.py` only
+checks the database is at head and refuses to start otherwise.
+
 Dependencies, tool config and the Python version all live in `pyproject.toml`
 (+ `uv.lock`, `.python-version`). Install everything: `uv sync --all-extras --dev`.
 The `dev` group is test/lint tooling and must never reach the Docker image; the

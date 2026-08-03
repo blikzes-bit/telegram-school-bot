@@ -10,11 +10,11 @@ import datetime
 import logging
 import os
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from config import APP_VERSION, HEARTBEAT_FILE
 from database import db
-from database.migrate import get_script_head
+from database.migrate import get_db_revision, get_script_head
 from database.models import ReminderJob
 
 logger = logging.getLogger(__name__)
@@ -51,18 +51,6 @@ def heartbeat_age_seconds() -> float | None:
     return max(0.0, _utcnow().timestamp() - mtime)
 
 
-async def _db_revision() -> str | None:
-    """The Alembic revision stamped in *this* database, or None if the
-    ``alembic_version`` table is absent (e.g. a dev DB built by ``init_db``)."""
-    try:
-        async with db.AsyncSessionLocal() as session:
-            result = await session.execute(text("SELECT version_num FROM alembic_version"))
-            row = result.first()
-            return row[0] if row else None
-    except Exception:
-        return None
-
-
 async def _job_counts() -> dict[str, int]:
     """Counts of outbox reminder jobs by health bucket (global, not per-chat:
     this is an operational metric, not user data)."""
@@ -94,7 +82,7 @@ async def collect_status() -> dict:
         "app_version": APP_VERSION,
         "scheduler_alive": scheduler_alive,
         "heartbeat_age": heartbeat,
-        "db_revision": await _db_revision(),
+        "db_revision": await get_db_revision(),
         "head_revision": get_script_head(),
         "jobs": await _job_counts(),
     }
