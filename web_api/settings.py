@@ -41,6 +41,10 @@ class WebSettings:
     # How long a verified ChatMembership stays valid without being re-confirmed
     # through /web. 0 disables the check (matching AUDIT_RETENTION_DAYS).
     membership_max_age_seconds: int = 30 * 24 * 3600
+    # Directory holding the built frontend (``web/dist`` copied into the image).
+    # When it has no index.html the API runs bare and Vite serves the frontend,
+    # which is what the dev stack does.
+    web_dist_dir: str = "web_dist"
 
     @property
     def is_production(self) -> bool:
@@ -87,6 +91,7 @@ def load_settings() -> WebSettings:
         auth_rate_limit=_get_int("AUTH_RATE_LIMIT", 20),
         auth_rate_window_seconds=_get_int("AUTH_RATE_WINDOW", 60),
         membership_max_age_seconds=_get_int("MEMBERSHIP_MAX_AGE", 30 * 24 * 3600),
+        web_dist_dir=os.getenv("WEB_DIST_DIR", "web_dist"),
     )
 
 
