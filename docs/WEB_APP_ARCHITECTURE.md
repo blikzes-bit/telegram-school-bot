@@ -185,6 +185,21 @@ New settings (see `.env.example`), read once into a typed `web_api/settings.py`
 | `AUTH_RATE_LIMIT` | `20` | Max `/auth/telegram` attempts per IP per window (`0` disables). |
 | `AUTH_RATE_WINDOW` | `60` | Rate-limit window in seconds. |
 | `MEMBERSHIP_MAX_AGE` | `2592000` | How long a verified membership lasts without a `/web` re-run, in seconds (30 days). `0` disables expiry. |
+| `WEB_DIST_DIR` | `web_dist` | Built frontend served next to `/api`. No `index.html` there → API runs bare (development, where Vite serves the frontend). |
+
+### Serving the frontend
+
+In production the API also serves the built SPA, so the Mini App is a single
+origin: the session cookie is first-party and `WEB_ALLOWED_ORIGINS` can stay
+empty (the CORS middleware is only added when it is non-empty).
+
+`StaticFiles(html=True)` alone is not enough. It returns `index.html` only for
+directory URLs and answers anything else with a 404 (or `404.html`), so a hard
+refresh on a React Router path like `/classes/-100123/homework` would 404. The
+app therefore mounts `/assets` and registers a catch-all **after** the API
+routers, which returns the shell with a 200. Unknown `/api/` paths are excluded
+from it and keep their 404, and a percent-encoded traversal cannot escape the
+build directory.
 
 `BOT_TOKEN` is validated **lazily** (`config.require_bot_token()`) only when the
 bot or web-auth actually needs it — importing the models/API no longer requires
