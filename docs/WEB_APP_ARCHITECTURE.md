@@ -219,7 +219,7 @@ it.
 **Backend (API):**
 
 ```bash
-pip install -r requirements-dev.txt        # prod + web + test tooling
+uv sync --all-extras --dev                 # prod + web + test tooling
 $env:BOT_TOKEN = "…"                        # PowerShell (or export on *nix)
 uvicorn web_api.main:app --reload --port 8000
 ```

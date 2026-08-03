@@ -4,6 +4,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # Pinned on purpose: `uv audit` is still an experimental command, so an
+  # unattended uv upgrade must not be able to change or break the audit step.
+  UV_VERSION: "0.11.31"
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -13,25 +18,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
 
+      # The interpreter comes from .python-version, so CI, the Docker image and
+      # a local checkout all run the same one.
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: uv sync --all-extras --dev --frozen
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Type-check (mypy)
-        run: mypy .
+        run: uv run mypy .
 
       - name: Test with coverage
-        run: pytest --cov=. --cov-report=term-missing --cov-report=xml
+        run: uv run pytest --cov=. --cov-report=term-missing --cov-report=xml
 
+      # Production dependencies only, matching the previous pip-audit scope.
       - name: Dependency vulnerability audit
-        run: pip-audit -r requirements.txt
+        run: uv audit --frozen --no-dev
 
   frontend:
     runs-on: ubuntu-latest

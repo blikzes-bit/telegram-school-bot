@@ -1,6 +1,7 @@
 # 🎓 Telegram School Bot
 
-![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14-blue?logo=python&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
 ![Aiogram](https://img.shields.io/badge/Aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-multi--arch-2496ED?logo=docker&logoColor=white)
@@ -115,30 +116,50 @@ telegram-school-bot/
 git clone https://github.com/blikzes-bit/telegram-school-bot.git
 cd telegram-school-bot
 
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
-
-pip install -r requirements-dev.txt   # прод + тесты/линт/типы
+uv sync --all-extras --dev    # окружение по pyproject.toml + uv.lock
 
 cp .env.example .env          # укажи свой BOT_TOKEN
 
-python bot.py
+uv run python bot.py
 ```
 
 При старте `bot.py` сам прогоняет `alembic upgrade head`, поднимая схему БД до актуальной версии (см. раздел «Миграции БД» ниже).
 
 ### Docker
 
-Готовый мультиархитектурный образ (`amd64` + `arm64`) публикуется в GHCR при каждом пуше в `main`. Продакшн-образ собирается в два этапа (builder/final), не содержит тестов и dev-инструментов, запускается от непривилегированного пользователя и имеет встроенный `HEALTHCHECK`:
+Готовый мультиархитектурный образ (`amd64` + `arm64`) публикуется в GHCR при каждом пуше в `main`. Не содержит тестов, dev-инструментов и Node, запускается от непривилегированного пользователя.
+
+У образа **три роли**, задаются командой. Бот и API делят `database/models.py` и слой сервисов, поэтому едут одним тегом — так между ними не может возникнуть расхождения версий.
 
 ```bash
-docker run -d \
-  --name school-bot \
+# 1. Накатить миграции и выйти. Отдельным шагом, а не побочным эффектом
+#    старта бота, — после него бот и веб можно поднимать в любом порядке.
+docker run --rm -v school_bot_data:/data \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest migrate
+
+# 2. Бот
+docker run -d --name school-bot \
   -e BOT_TOKEN=your_token_here \
   -e TIMEZONE=Europe/Kiev \
   -v school_bot_data:/data \
-  ghcr.io/blikzes-bit/telegram-school-bot:latest
+  --health-cmd "python -c \"import os,sys,time; p=os.environ['HEARTBEAT_FILE']; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<150 else 1)\"" \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest bot
+
+# 3. Mini App: API и собранный фронтенд с одного origin
+docker run -d --name school-web \
+  -e BOT_TOKEN=your_token_here \
+  -e APP_ENV=production \
+  -e SESSION_SECRET=... \
+  -v school_bot_data:/data -p 8000:8000 \
+  --health-cmd "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health').status==200 else 1)\"" \
+  ghcr.io/blikzes-bit/telegram-school-bot:latest web
 ```
+
+`HEALTHCHECK` не зашит в образ намеренно: роли проверяются по-разному (бот обновляет `HEARTBEAT_FILE`, API отвечает на `/api/v1/health`), а директива статическая — поэтому проверка задаётся на контейнере.
+
+За обратным прокси роли `web` нужен `FORWARDED_ALLOW_IPS` с адресом прокси, иначе ограничитель попыток входа увидит один и тот же IP у всех запросов и превратится в общий лимит на всех пользователей.
+
+**`SESSION_SECRET` должен совпадать у бота и у веба.** Бот хеширует им одноразовый токен запуска, API по этому же хешу его ищет — если значения разойдутся, вход будет молча падать с «launch token is invalid».
 
 База данных хранится в `/data/school_bot.db` — том нужен для сохранения данных между перезапусками контейнера.
 
@@ -150,7 +171,7 @@ docker run -d \
 | `TIMEZONE` | ❌ | `Europe/Kiev` | Часовой пояс **по умолчанию** для новых чатов (и запасной вариант, если у чата сохранён неизвестный пояс). Каждый чат может задать свой пояс в ⚙️ Настройках |
 | `DATABASE_URL` | ❌ | `sqlite+aiosqlite:///school_bot.db` | Строка подключения к БД (только SQLite) |
 | `FSM_STORAGE` | ❌ | `sqlite` | `sqlite` — персистентное хранилище состояний диалогов (переживает перезапуск), `memory` — только для локальной разработки |
-| `HEARTBEAT_FILE` | ❌ | `.heartbeat` | Файл, который планировщик обновляет каждую минуту; используется Docker `HEALTHCHECK` |
+| `HEARTBEAT_FILE` | ❌ | `.heartbeat` | Файл, который планировщик обновляет каждую минуту; по нему проверяется живость роли `bot` |
 | `AUDIT_RETENTION_DAYS` | ❌ | `180` | Сколько дней хранится история изменений; старые записи удаляются ночным обслуживанием. `0` — не удалять никогда |
 
 ---
@@ -172,9 +193,9 @@ docker run -d \
 Бэкенд (FastAPI):
 
 ```bash
-pip install -r requirements-dev.txt          # прод + web + инструменты тестов
+uv sync --all-extras --dev                    # прод + web + инструменты тестов
 export BOT_TOKEN=...                          # PowerShell: $env:BOT_TOKEN="..."
-uvicorn web_api.main:app --reload --port 8000
+uv run uvicorn web_api.main:app --reload --port 8000
 ```
 
 Фронтенд (React + Vite):
@@ -259,11 +280,11 @@ docker compose up -d --build   # пересобрать и перезапуст�
 ## 🧪 Тесты и качество кода
 
 ```bash
-pytest                                  # полный набор тестов
-pytest --cov=. --cov-report=term-missing  # с покрытием
-ruff check .                            # линт
-mypy .                                  # проверка типов
-pip-audit -r requirements.txt           # аудит зависимостей на уязвимости
+uv run pytest                              # полный набор тестов
+uv run pytest --cov=. --cov-report=term-missing  # с покрытием
+uv run ruff check .                        # линт
+uv run mypy .                              # проверка типов
+uv audit --frozen --no-dev                 # аудит зависимостей на уязвимости
 ```
 
 Тесты покрывают: часовой пояс каждого чата (Europe/Kyiv, UTC, America/New_York, разные календарные даты у чатов в один и тот же момент, переходы летнего времени — несуществующее и повторяющееся локальное время, отсутствие двойного напоминания, неизвестная зона не ломает планировщик), вложения ДЗ (FSM добавления, несколько файлов, лимит и дубликаты, удаление с подтверждением, каскад при удалении ДЗ, изоляция по `chat_id`, права, недоверенное имя файла, ошибки Telegram API на «мёртвом» `file_id`), работу с БД и конкурентный `get_or_create_chat`, атомарность онбординга и переконфигурации, поведение до `/start` и после полного сброса, права доступа участник/админ в группе, все три режима прав на ДЗ (админ / автор / другой участник, включая старые записи с `NULL`-авторством), авторство и журнал аудита (в том числе то, что удалённая запись оставляет строку истории, а журнал изолирован по `chat_id` и экранирует HTML), безопасный HTML-рендеринг, устаревшие/битые callback-кнопки, edge-cases дат (29 февраля, просроченные быстрые кнопки), outbox-доставку напоминаний (частичный сбой, `RetryAfter`, `Forbidden`) и миграцию group → supergroup. GitHub Actions прогоняет полный CI (лint + типы + тесты + аудит) на каждый pull request, а тесты — перед публикацией Docker-образа.
