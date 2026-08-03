@@ -10,6 +10,20 @@
 # Then open http://localhost:5173 (the frontend proxies /api to the API).
 
 services:
+  # Applying migrations is its own step — the bot no longer does it at startup,
+  # and it refuses to run against a schema that is not at head. Runs to
+  # completion before anything else starts.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: migrate
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/school_bot.db
+    volumes:
+      - schooldata:/data
+
   bot:
     build:
       context: .
@@ -20,6 +34,9 @@ services:
     volumes:
       - schooldata:/data
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   api:
     build:
@@ -39,7 +56,8 @@ services:
       - ./services:/app/services
       - ./database:/app/database
     depends_on:
-      - bot
+      migrate:
+        condition: service_completed_successfully
 
   web:
     image: node:22-alpine

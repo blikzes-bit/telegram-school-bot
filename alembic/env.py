@@ -13,7 +13,12 @@ config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which would switch off every
+    # logger created before this line. Migrations run inside the bot process at
+    # startup (bot.py -> run_migrations), so the default silences the whole
+    # application for the rest of its life: no polling logs, no scheduler
+    # diagnostics, and no tracebacks from the error handler.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
