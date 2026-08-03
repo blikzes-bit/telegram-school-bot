@@ -38,6 +38,9 @@ class WebSettings:
     allowed_origins: List[str] = field(default_factory=list)
     auth_rate_limit: int = 20
     auth_rate_window_seconds: int = 60
+    # How long a verified ChatMembership stays valid without being re-confirmed
+    # through /web. 0 disables the check (matching AUDIT_RETENTION_DAYS).
+    membership_max_age_seconds: int = 30 * 24 * 3600
 
     @property
     def is_production(self) -> bool:
@@ -83,6 +86,7 @@ def load_settings() -> WebSettings:
         ),
         auth_rate_limit=_get_int("AUTH_RATE_LIMIT", 20),
         auth_rate_window_seconds=_get_int("AUTH_RATE_WINDOW", 60),
+        membership_max_age_seconds=_get_int("MEMBERSHIP_MAX_AGE", 30 * 24 * 3600),
     )
 
 
