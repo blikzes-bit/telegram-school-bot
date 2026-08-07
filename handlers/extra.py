@@ -26,7 +26,8 @@ from aiogram.types import CallbackQuery, Message
 
 from database.db import (
     add_extra_activity, get_extra_activities, get_extra_activity_by_id,
-    update_extra_activity, delete_extra_activity, set_extra_activity_reminder,
+    get_or_create_chat, update_extra_activity, delete_extra_activity,
+    set_extra_activity_reminder,
 )
 from database.models import ExtraActivity
 from keyboards.inline import (
@@ -35,8 +36,9 @@ from keyboards.inline import (
     get_extra_edit_menu_keyboard, get_extra_delete_confirm_keyboard,
     get_extra_reminder_keyboard, get_cancel_keyboard,
 )
-from keyboards.reply import get_main_menu
-from middleware.access import require_admin, is_chat_admin
+from keyboards.reply import main_menu_for
+from middleware.access import is_chat_admin
+from services.permissions import require_extra_access
 import services.audit as audit
 import services.timeservice as ts
 from services.extra_activities import (  # noqa: F401  (re-exported)
@@ -48,6 +50,18 @@ from utils import (
 )
 
 router = Router()
+
+
+async def _guard_extra(callback: CallbackQuery) -> bool:
+    """Server-side gate for every mutating action on this screen.
+
+    Extra activities are managed by owners *and* editors, so this is not the
+    plain admin guard: see ``services.permissions.require_extra_access``. In the
+    default access mode it resolves to the previous rule (admins only in a
+    group, anybody in a private chat).
+    """
+    chat = await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
+    return await require_extra_access(callback, chat, callback.bot)
 
 NON_TEXT_HINT = "🤔 Мне нужен текст. Пожалуйста, отправь сообщение текстом (или нажми «❌ Отмена»)."
 STALE_BUTTON_TEXT = "⚠️ Эта кнопка устарела, открой список заново."
@@ -255,7 +269,7 @@ async def _reject_missing(callback: CallbackQuery):
 
 @router.callback_query(F.data == "ea_add")
 async def process_extra_add(callback: CallbackQuery, state: FSMContext):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     await state.clear()
     await state.set_state(ExtraActivityStates.waiting_for_kind)
@@ -418,7 +432,7 @@ async def process_extra_note(message: Message, state: FSMContext):
     )
     await state.clear()
 
-    await message.answer("✅ Доп. занятие сохранено!", reply_markup=get_main_menu())
+    await message.answer("✅ Доп. занятие сохранено!", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
     activities = sorted(await get_extra_activities(message.chat.id), key=_sort_key)
     await message.answer(
         await format_extra_list(message.chat.id),
@@ -431,7 +445,7 @@ async def process_extra_note(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("ea_delete_ask:"))
 async def process_extra_delete_ask(callback: CallbackQuery):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1)
     if ints is None:
@@ -452,7 +466,7 @@ async def process_extra_delete_ask(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ea_delete_confirm:"))
 async def process_extra_delete_confirm(callback: CallbackQuery):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1)
     if ints is None:
@@ -476,7 +490,7 @@ async def process_extra_delete_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ea_edit_menu:"))
 async def process_extra_edit_menu(callback: CallbackQuery, state: FSMContext):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     await state.clear()
     ints = safe_callback_ints(callback.data, 1)
@@ -515,7 +529,7 @@ EDIT_FIELD_PROMPTS = {
 
 @router.callback_query(F.data.startswith("ea_edit_field:"))
 async def process_extra_edit_field(callback: CallbackQuery, state: FSMContext):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     parts = callback.data.split(":")
     ints = safe_callback_ints(callback.data, 1)
@@ -561,7 +575,7 @@ async def process_extra_edit_field(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("ea_setday:"))
 async def process_extra_set_day(callback: CallbackQuery):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1, 2)
     if ints is None or not (0 <= ints[1] <= 6):
@@ -649,7 +663,7 @@ async def process_extra_edit_value(message: Message, state: FSMContext):
     if not updated:
         await message.answer(
             "⚠️ Это занятие уже не существует (возможно, было удалено).",
-            reply_markup=get_main_menu(),
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type),
         )
     else:
         activity = await get_extra_activity_by_id(message.chat.id, activity_id)
@@ -661,7 +675,7 @@ async def process_extra_edit_value(message: Message, state: FSMContext):
                 audit.fields_summary([EDIT_FIELD_AUDIT_LABELS.get(field, field)]),
             ),
         )
-        await message.answer("✅ Занятие обновлено!", reply_markup=get_main_menu())
+        await message.answer("✅ Занятие обновлено!", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
 
     activities = sorted(await get_extra_activities(message.chat.id), key=_sort_key)
     await message.answer(
@@ -690,7 +704,7 @@ async def _show_reminder_menu(callback: CallbackQuery, activity: ExtraActivity, 
 
 @router.callback_query(F.data.startswith("ea_rem_menu:"))
 async def process_extra_reminder_menu(callback: CallbackQuery, state: FSMContext):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     await state.clear()
     ints = safe_callback_ints(callback.data, 1)
@@ -706,7 +720,7 @@ async def process_extra_reminder_menu(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data.startswith("ea_rem_toggle:"))
 async def process_extra_reminder_toggle(callback: CallbackQuery):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1)
     if ints is None:
@@ -732,7 +746,7 @@ async def process_extra_reminder_toggle(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ea_rem_min:"))
 async def process_extra_reminder_minutes(callback: CallbackQuery):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1, 2)
     if ints is None or not (0 <= ints[1] <= 10080):
@@ -758,7 +772,7 @@ async def process_extra_reminder_minutes(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ea_rem_custom:"))
 async def process_extra_reminder_custom(callback: CallbackQuery, state: FSMContext):
-    if not await require_admin(callback, callback.bot):
+    if not await _guard_extra(callback):
         return
     ints = safe_callback_ints(callback.data, 1)
     if ints is None:
@@ -796,14 +810,14 @@ async def process_extra_reminder_minutes_value(message: Message, state: FSMConte
         actor_user_id=actor_user_id, actor_name=actor_name,
     )
     if not ok:
-        await message.answer("⚠️ Это занятие уже не существует.", reply_markup=get_main_menu())
+        await message.answer("⚠️ Это занятие уже не существует.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
     await audit.record_event(
         message, message.chat.id, audit.ENTITY_EXTRA, audit.ACTION_UPDATE,
         entity_id=activity_id, summary=audit.summarize("поля: напоминание"),
     )
     label = "в начале занятия" if minutes == 0 else f"за {minutes} мин до начала"
-    await message.answer(f"✅ Напоминание установлено: {label}.", reply_markup=get_main_menu())
+    await message.answer(f"✅ Напоминание установлено: {label}.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
     activities = sorted(await get_extra_activities(message.chat.id), key=_sort_key)
     await message.answer(
         await format_extra_list(message.chat.id),

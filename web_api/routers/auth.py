@@ -1,5 +1,13 @@
-"""Authentication: exchange Telegram initData for an opaque web session."""
+"""Authentication: exchange Telegram initData for an opaque web session.
+
+``start_param`` may carry either a one-time **launch token** (minted by the bot's
+``/web`` command for someone already in the chat) or an **invitation**
+(``inv_<token>``, minted by an owner for someone who may not be in the chat at
+all). Both ride inside the signed initData, so neither is ever read from
+untrusted client state.
+"""
 import datetime
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
@@ -7,6 +15,7 @@ from pydantic import BaseModel
 import config
 import database.db as db
 from application.dto import MeDTO
+from application.queries import InviteError, accept_invite
 from web_api.deps import (
     _is_expired, get_current_user, get_web_settings,
 )
@@ -16,6 +25,11 @@ from web_api.security import (
 from web_api.settings import WebSettings
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+logger = logging.getLogger(__name__)
+
+# Distinguishes an invitation from a launch token in ``start_param``.
+_INVITE_PREFIX = "inv_"
 
 
 class TelegramAuthRequest(BaseModel):
@@ -71,9 +85,26 @@ async def telegram_auth(
 
     user = await db.upsert_web_user(verified.user_id, verified.display_name, now_iso)
 
+    # An invitation (``inv_<token>``) arrives the same way a launch token does —
+    # inside the *signed* initData — so the token never has to be read from
+    # untrusted client state. It is redeemed here, before the session exists,
+    # because it is what gives this user access to the class in the first place.
+    # A dead invite must not block signing in: the user still gets a session and
+    # simply sees no class, which is a far better failure than a login loop.
+    if verified.start_param and verified.start_param.startswith(_INVITE_PREFIX):
+        raw_invite = verified.start_param[len(_INVITE_PREFIX):]
+        try:
+            await accept_invite(
+                hash_token(settings.session_secret, raw_invite),
+                verified.user_id,
+                verified.display_name,
+            )
+        except InviteError:
+            logger.info("Ignoring an unusable invitation during login")
+
     # A launch token (delivered via start_param) establishes / re-verifies the
     # membership that scopes this user to a class.
-    if verified.start_param:
+    elif verified.start_param:
         token_hash = hash_token(settings.session_secret, verified.start_param)
         launch = await db.consume_launch_token(token_hash, now_iso)
         if launch is None:

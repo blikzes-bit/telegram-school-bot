@@ -1,8 +1,9 @@
-# Telegram Mini App — Architecture (Stage 1)
+# Telegram Mini App — Architecture
 
 This document describes the **web** surface added on top of the existing Telegram
-bot: a secure Telegram **Mini App** with a read-only first vertical slice
-(authorisation → class picker → *Today* / *Schedule* / *Homework* / *Extra*).
+bot: a secure Telegram **Mini App** covering authorisation → class picker →
+*Today* / *Schedule* / *Homework* / *Extra* / *Payments* / *Members* / *Settings*,
+with full read **and write** access gated by the shared permission core.
 
 The bot itself is unchanged in behaviour. The web app and the bot **share the
 same domain logic** (schedule resolution, extra-activity filtering) and the same
@@ -131,6 +132,18 @@ endpoints additionally require a verified membership (else `403`).
 | GET  | `/classes/{chat_id}/schedule?from=…&to=…` | Effective schedule per day (≤ 62 days). |
 | GET  | `/classes/{chat_id}/homework?status=active\|completed\|overdue` | Homework list. |
 | GET  | `/classes/{chat_id}/extra?from=…&to=…` | Extra activities in a window. |
+| POST/PATCH/DELETE | `/classes/{chat_id}/homework[/{id}]` | Add, edit, delete homework. |
+| PATCH | `/classes/{chat_id}/homework/{id}/complete` | Tick homework off (a looser gate than editing). |
+| POST/PATCH/DELETE | `/classes/{chat_id}/extra[/{id}]` | Manage extra activities. |
+| GET/PUT | `/classes/{chat_id}/schedule/template`, `…/schedule/slots` | The weekly template and bell times. |
+| GET/PUT/DELETE | `/classes/{chat_id}/overrides/{date}[/lessons/{n}]` | Per-date changes. |
+| GET/POST/PATCH/DELETE | `/classes/{chat_id}/payments[/{id}]` | Lesson payments (tutor profile). |
+| GET/PATCH/DELETE | `/classes/{chat_id}/members[/{user_id}]` | Members and their app roles. |
+| PUT | `/classes/{chat_id}/access-mode?mode=…` | Switch Telegram-derived ↔ role-based rights. |
+| GET/POST/DELETE | `/classes/{chat_id}/invites[/{id}]` | Invitation links (owner only). |
+| POST | `/invites/accept` | Redeem an invitation (session required, membership not). |
+| GET/PATCH | `/classes/{chat_id}/settings/class`, `…/settings/reminders` | Chat settings. |
+| GET  | `/classes/{chat_id}/audit`, `…/export/*` | History and exports. |
 
 The **Today** payload contains: the class's local date + timezone, the effective
 schedule (A/B week + per-date overrides applied), homework buckets (due today /
@@ -230,19 +243,19 @@ cd web && npm run typecheck && npm run lint && npm run test && npm run build
 
 ## 7. Roadmap
 
-**Stage 2 — Persistence & writes**
-- Migrate from SQLite to **PostgreSQL** (async driver), keep the API contract.
-- **CRUD** for schedule / homework / extra with **optimistic locking**.
-- Full **RBAC** reusing `web_api/deps.build_permissions` (already server-computed
-  in stage 1 so mutation endpoints can plug straight in).
+**Done since stage 1:** writes for homework / extra / schedule / per-date changes,
+chat profiles (`personal` / `class` / `tutor`), app roles with an explicit access
+mode, invitation links, lesson payments, and a single permission core
+(`services/permissions.capabilities`) shared by the bot and the API.
 
-**Stage 3 — Attachments & background work**
-- **S3-compatible** storage for homework attachments (still store references
-  only; never execute files).
-- A dedicated **worker** and a **durable queue** for reminders/notifications,
-  decoupled from the request path.
-
-**Stage 4 — Beyond the Mini App**
-- **Telegram OIDC** login for use outside the Mini App.
-- **PWA** packaging (installable, offline shell).
-- **Metrics + tracing** (OpenTelemetry) across bot, API and worker.
+**Still open**
+- Migrate from SQLite to **PostgreSQL** (async driver), keeping the API contract.
+- **Optimistic locking** on mutations: two people can currently overwrite each
+  other's edit silently.
+- **Per-student homework completion** — needs a decision on what a chat-wide
+  reminder means once "done" is per person.
+- **S3-compatible** storage for homework attachments (still references only).
+- A dedicated **worker** and durable queue for reminders, off the request path.
+- **Telegram OIDC** login outside the Mini App, **PWA** packaging, and
+  **metrics + tracing** (OpenTelemetry) across bot, API and worker.
+- Shared (not process-local) store for the auth rate limiter.

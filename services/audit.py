@@ -38,10 +38,12 @@ ENTITY_SCHEDULE = "schedule"          # weekly template (lessons / call times / 
 ENTITY_DAY_OVERRIDE = "day_override"  # per-date whole-day setting
 ENTITY_LESSON_OVERRIDE = "lesson_override"  # per-date per-lesson change
 ENTITY_SETTINGS = "settings"          # reminder settings, policies, full reset
+ENTITY_PAYMENT = "payment"            # lesson payments (tutor profile)
 
 ENTITY_TYPES = (
     ENTITY_HOMEWORK, ENTITY_EXTRA, ENTITY_SCHEDULE,
     ENTITY_DAY_OVERRIDE, ENTITY_LESSON_OVERRIDE, ENTITY_SETTINGS,
+    ENTITY_PAYMENT,
 )
 
 ENTITY_LABELS = {
@@ -51,6 +53,7 @@ ENTITY_LABELS = {
     ENTITY_DAY_OVERRIDE: "🗓 Тип дня",
     ENTITY_LESSON_OVERRIDE: "🗓 Изменение урока",
     ENTITY_SETTINGS: "⚙️ Настройки",
+    ENTITY_PAYMENT: "💳 Оплата",
 }
 
 # --- Actions ----------------------------------------------------------------

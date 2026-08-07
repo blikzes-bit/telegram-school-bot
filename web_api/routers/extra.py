@@ -41,7 +41,7 @@ async def extra(
         start = await ts.today_for_chat_id(chat_id)
     if end is None:
         end = start + datetime.timedelta(days=_DEFAULT_SPAN_DAYS)
-    return await list_extra(chat_id, start, end, is_admin=ctx.permissions.is_admin)
+    return await list_extra(chat_id, start, end, caps=ctx.caps)
 
 
 @router.post(
@@ -55,7 +55,7 @@ async def add_extra_endpoint(
 ) -> ExtraActivityDTO:
     try:
         return await create_extra_activity(
-            chat_id, payload, ctx.permissions.is_admin,
+            chat_id, payload, ctx.caps,
             actor_user_id=user.telegram_user_id, actor_name=user.display_name,
         )
     except ExtraActivityAccessError:
@@ -75,7 +75,7 @@ async def edit_extra_endpoint(
 ) -> ExtraActivityDTO:
     try:
         result = await edit_extra_activity(
-            chat_id, activity_id, payload, ctx.permissions.is_admin,
+            chat_id, activity_id, payload, ctx.caps,
             actor_user_id=user.telegram_user_id, actor_name=user.display_name,
         )
     except ExtraActivityAccessError:
@@ -99,7 +99,7 @@ async def delete_extra_endpoint(
 ) -> None:
     try:
         deleted = await remove_extra_activity(
-            chat_id, activity_id, ctx.permissions.is_admin,
+            chat_id, activity_id, ctx.caps,
             actor_user_id=user.telegram_user_id, actor_name=user.display_name,
         )
     except ExtraActivityAccessError:

@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { ExtraActivity, Homework, Lesson } from "../api/types";
 import { formatDate } from "../utils/date";
 
@@ -91,11 +93,25 @@ export function HomeworkRow({
   homework,
   onToggle,
   toggling = false,
+  onEdit,
+  onDelete,
+  deleting = false,
 }: {
   homework: Homework;
   onToggle?: (isCompleted: boolean) => void;
   toggling?: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  deleting?: boolean;
 }) {
+  // Deleting is irreversible, so it takes two taps: the second one appears only
+  // after the first, right where the finger already is.
+  const [confirming, setConfirming] = useState(false);
+  // Two separate answers from the server: a student may tick homework off
+  // without being allowed to rewrite or delete it.
+  const canChange = homework.can_edit;
+  const canComplete = homework.can_complete;
+
   return (
     <li className={`homework homework--${homework.status}`}>
       <div className="homework__head">
@@ -106,18 +122,76 @@ export function HomeworkRow({
       </div>
       <p className="homework__description">{homework.description}</p>
       <div className="homework__foot">
-        <span className="homework__due">Сдать: {formatDate(homework.due_date)}</span>
-        {onToggle && homework.can_edit && (
+        <span className="homework__due">
+          Сдать: {formatDate(homework.due_date)}
+          {/* Only meaningful where marks are personal: a shared mark has nobody
+              to count. */}
+          {homework.per_student && homework.completed_count !== null && (
+            <> · сделали: {homework.completed_count}</>
+          )}
+        </span>
+        {onToggle && canComplete && (
           <button
             type="button"
             className="homework__toggle"
             disabled={toggling}
             onClick={() => onToggle(!homework.is_completed)}
           >
-            {homework.is_completed ? "Вернуть в список" : "Выполнено"}
+            {homework.is_completed
+              ? homework.per_student
+                ? "Я не сделал"
+                : "Вернуть в список"
+              : homework.per_student
+                ? "Я сделал"
+                : "Выполнено"}
           </button>
         )}
       </div>
+
+      {canChange && (onEdit || onDelete) && !confirming && (
+        <div className="homework__actions">
+          {onEdit && (
+            <button type="button" className="row-action" onClick={onEdit}>
+              ✏️ Изменить
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              className="row-action row-action--danger"
+              onClick={() => setConfirming(true)}
+            >
+              🗑 Удалить
+            </button>
+          )}
+        </div>
+      )}
+
+      {confirming && onDelete && (
+        <div className="homework__confirm">
+          <span>Удалить задание навсегда?</span>
+          <div className="homework__actions">
+            <button
+              type="button"
+              className="row-action row-action--danger"
+              disabled={deleting}
+              onClick={() => {
+                setConfirming(false);
+                onDelete();
+              }}
+            >
+              Да, удалить
+            </button>
+            <button
+              type="button"
+              className="row-action"
+              onClick={() => setConfirming(false)}
+            >
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
     </li>
   );
 }

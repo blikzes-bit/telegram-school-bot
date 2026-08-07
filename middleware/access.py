@@ -19,8 +19,9 @@ Policy (documented here as the single source of truth, mirrored in README):
 
 Two independent pieces live here:
   * ``ChatContextMiddleware`` — resolves/creates the ``Chat`` row for every
-    update and stores it as ``data["chat"]``, and clears any stale
-    ``is_blocked`` flag now that the chat is talking to the bot again.
+    update and stores it as ``data["chat"]``, clears any stale ``is_blocked``
+    flag now that the chat is talking to the bot again, and fills in a missing
+    class display name from the group's Telegram title.
   * ``OnboardingGuardMiddleware`` — attached only to routers whose handlers
     require a completed onboarding (today/schedule/homework/settings), so
     that command/callback handlers never have to re-check this themselves,
@@ -36,12 +37,18 @@ from typing import Any, Awaitable, Callable, Dict, Union
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 
-from database.db import get_or_create_chat, mark_chat_seen
+from database.db import get_or_create_chat, mark_chat_seen, set_chat_title
+from utils import MAX_CHAT_TITLE_LEN
 
 ONBOARDING_REQUIRED_TEXT = (
     "⚠️ Сначала нужно завершить настройку бота. Отправь /start, чтобы начать."
 )
 ADMIN_ONLY_TEXT = "🚫 Это действие доступно только администраторам чата."
+# Shown instead of the above when the chat has switched to role-based rights, so
+# the refusal explains the actual reason rather than talking about Telegram admins.
+OWNER_ONLY_TEXT = (
+    "🚫 В этом чате настройки меняет только владелец. Попроси его, если нужно."
+)
 
 
 def is_group_chat(chat_type: str) -> bool:
@@ -63,24 +70,41 @@ async def is_chat_admin(bot, chat_id: int, user_id: int, chat_type: str) -> bool
 
 async def require_admin(event: Union[Message, CallbackQuery], bot) -> bool:
     """
+    Guard for an action that changes shared, chat-wide configuration.
+
     Returns True if the action may proceed. On rejection, answers the user
     with a clear message/alert and returns False — callers must ``return``
     immediately afterwards.
+
+    "Administrator" is resolved through ``services.permissions.capabilities``,
+    not straight from Telegram, so it means the same thing here as in the Mini
+    App. In the default access mode that is exactly a Telegram admin (unchanged
+    behaviour); in role mode it is the chat's owner, because the whole point of
+    role mode is that app rights stop following Telegram admin status.
     """
     # Duck-type Message vs CallbackQuery: a Message carries ``chat`` directly,
     # a CallbackQuery reaches its chat through the attached ``message``. This is
     # robust to test doubles that don't subclass the aiogram models.
+    from services.permissions import ACCESS_ROLES, capabilities_for_event, normalize_access_mode
+
     is_message = getattr(event, "chat", None) is not None
-    chat = event.chat if is_message else event.message.chat
+    tg_chat = event.chat if is_message else event.message.chat
     user = event.from_user
-    allowed = await is_chat_admin(bot, chat.id, user.id, chat.type)
-    if allowed:
+
+    chat = await get_or_create_chat(tg_chat.id, tg_chat.type)
+    caps = await capabilities_for_event(bot, chat, getattr(user, "id", None))
+    if caps.is_admin:
         return True
 
+    text = (
+        OWNER_ONLY_TEXT
+        if normalize_access_mode(getattr(chat, "access_mode", None)) == ACCESS_ROLES
+        else ADMIN_ONLY_TEXT
+    )
     if is_message:
-        await event.answer(ADMIN_ONLY_TEXT)
+        await event.answer(text)
     else:
-        await event.answer(ADMIN_ONLY_TEXT, show_alert=True)
+        await event.answer(text, show_alert=True)
     return False
 
 
@@ -102,6 +126,17 @@ class ChatContextMiddleware(BaseMiddleware):
             if chat.is_blocked:
                 await mark_chat_seen(tg_chat.id)
                 chat.is_blocked = False
+
+            # Give the class a display name for the Mini App picker without
+            # asking anyone: a group's Telegram title is a good default. Written
+            # only while no name is stored, so a name chosen in the app is never
+            # overwritten, and only when it would actually change something (no
+            # write on the overwhelming majority of updates).
+            tg_title = getattr(tg_chat, "title", None)
+            if tg_title and not chat.title:
+                if await set_chat_title(tg_chat.id, tg_title, only_if_empty=True):
+                    chat.title = tg_title.strip()[:MAX_CHAT_TITLE_LEN] or None
+
             data["chat"] = chat
 
         return await handler(event, data)

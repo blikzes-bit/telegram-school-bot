@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from web_api.ratelimit import RateLimiter
 from web_api.routers import (
-    audit, auth, classes, dashboard, export, extra, health, homework, schedule,
+    audit, auth, classes, dashboard, export, extra, health, homework, members,
+    payments, schedule,
 )
 from web_api.routers import settings as settings_router
 from web_api.settings import WebSettings, get_settings
@@ -41,7 +42,7 @@ def create_app(settings: Optional[WebSettings] = None) -> FastAPI:
 
     for module in (
         health, auth, classes, dashboard, schedule, homework, extra,
-        settings_router, audit, export,
+        settings_router, audit, export, members, payments,
     ):
         app.include_router(module.router)
 

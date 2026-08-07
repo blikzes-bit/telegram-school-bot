@@ -1,7 +1,8 @@
 """
 Tests for middleware/access.py: the ChatContextMiddleware (which resolves/creates
-the Chat row and clears a stale ``is_blocked`` flag) and the OnboardingGuard
-(which blocks feature handlers until onboarding is complete).
+the Chat row, clears a stale ``is_blocked`` flag and fills a missing class name
+from the group's Telegram title) and the OnboardingGuard (which blocks feature
+handlers until onboarding is complete).
 """
 from types import SimpleNamespace
 
@@ -54,6 +55,33 @@ async def test_chat_context_passes_through_without_chat(db):
     # An update with neither message nor callback (e.g. poll answer): no chat set.
     result = await ChatContextMiddleware()(handler, _update(), {})
     assert result == "no-chat"
+
+
+async def test_chat_context_fills_missing_class_name_from_group_title(db):
+    async def handler(event, data):
+        return data["chat"]
+
+    msg = SimpleNamespace(chat=SimpleNamespace(id=-880_600, type="group", title="9-А класс"))
+    resolved = await ChatContextMiddleware()(handler, _update(message=msg), {})
+    assert resolved.title == "9-А класс"
+    assert (await get_chat(-880_600)).title == "9-А класс"
+
+
+async def test_chat_context_never_overwrites_a_chosen_class_name(db):
+    """A name set in the Mini App must survive later updates from Telegram."""
+    from database.db import set_chat_title
+
+    chat_id = -880_601
+    await get_or_create_chat(chat_id, "group")
+    await set_chat_title(chat_id, "Моё название")
+
+    async def handler(event, data):
+        return data["chat"]
+
+    msg = SimpleNamespace(chat=SimpleNamespace(id=chat_id, type="group", title="Telegram Title"))
+    resolved = await ChatContextMiddleware()(handler, _update(message=msg), {})
+    assert resolved.title == "Моё название"
+    assert (await get_chat(chat_id)).title == "Моё название"
 
 
 async def test_onboarding_guard_blocks_until_onboarded(db):

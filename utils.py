@@ -26,6 +26,11 @@ MAX_TITLE_LEN = 100
 MAX_LOCATION_LEN = 100
 MAX_NOTE_LEN = 300
 
+# Display name of a class (``chats.title``), shown in the Mini App class picker.
+# Mirrored as a plain literal in ``application/dto.py`` so the DTO layer stays
+# free of bot-side imports; both ends validate independently on purpose.
+MAX_CHAT_TITLE_LEN = 100
+
 # --- Homework attachments --------------------------------------------------
 
 # How many files one homework entry may carry. A deliberate, low cap: a card

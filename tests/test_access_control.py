@@ -1,6 +1,10 @@
 """
 Covers: regular-member vs admin permissions in a group chat, and that
 private chats are never gated by the admin check.
+
+``require_admin`` resolves rights through ``services.permissions.capabilities``,
+which needs the chat row (to read its access mode), hence the ``db`` fixture on
+those tests. Role-mode behaviour is covered in tests/test_roles.py.
 """
 from types import SimpleNamespace
 
@@ -48,7 +52,7 @@ async def test_is_chat_admin_group_admin_true(fake_bot):
     assert await is_chat_admin(fake_bot, GROUP_CHAT_ID, ADMIN_USER_ID, "group") is True
 
 
-async def test_require_admin_rejects_regular_member_in_group(fake_bot):
+async def test_require_admin_rejects_regular_member_in_group(db, fake_bot):
     fake_bot.admins = {ADMIN_USER_ID}
     event = FakeCallbackEvent(GROUP_CHAT_ID, MEMBER_USER_ID, "group")
     allowed = await require_admin(event, fake_bot)
@@ -56,7 +60,7 @@ async def test_require_admin_rejects_regular_member_in_group(fake_bot):
     assert event.calls, "regular member must see a clear rejection message"
 
 
-async def test_require_admin_allows_admin_in_group(fake_bot):
+async def test_require_admin_allows_admin_in_group(db, fake_bot):
     fake_bot.admins = {ADMIN_USER_ID}
     event = FakeCallbackEvent(GROUP_CHAT_ID, ADMIN_USER_ID, "group")
     allowed = await require_admin(event, fake_bot)
@@ -64,7 +68,7 @@ async def test_require_admin_allows_admin_in_group(fake_bot):
     assert not event.calls
 
 
-async def test_require_admin_always_allows_private_chat(fake_bot):
+async def test_require_admin_always_allows_private_chat(db, fake_bot):
     event = FakeCallbackEvent(12345, MEMBER_USER_ID, "private")
     allowed = await require_admin(event, fake_bot)
     assert allowed is True

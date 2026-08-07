@@ -81,7 +81,8 @@ async def test_reconfigure_confirm_starts_flow(db):
     cb = FakeCallback(msg)
     await reconfigure_confirm(cb, state)
 
-    assert await state.get_state() == OnboardingStates.waiting_for_lessons_count.state
+    # Step 1 is now "what is this chat for" — the lesson questions come after it.
+    assert await state.get_state() == OnboardingStates.waiting_for_profile.state
 
 
 async def test_reconfigure_cancel_leaves_data_untouched(db):

@@ -1,6 +1,6 @@
 import { useParams } from "react-router-dom";
 
-import { useToday } from "../api/hooks";
+import { useClassSettings, useToday } from "../api/hooks";
 import { ExtraRow, HomeworkRow, LessonRow } from "../components/Rows";
 import { LoadingView, QueryError } from "../components/StateViews";
 import { formatDateFull, weekdayName } from "../utils/date";
@@ -10,6 +10,10 @@ export function TodayPage() {
   const { chatId } = useParams();
   const id = Number(chatId);
   const { data, isPending, isError, error, refetch } = useToday(id);
+  const { data: classSettings } = useClassSettings(id);
+  // A tutor chat has no school timetable, so the lessons block is not shown at
+  // all there. Assume it exists until the profile is known, to avoid a flicker.
+  const hasSchedule = classSettings?.features.school_schedule ?? true;
 
   if (isPending) return <LoadingView label="Загружаем сегодня…" />;
   if (isError) return <QueryError error={error} onRetry={() => refetch()} />;
@@ -28,20 +32,22 @@ export function TodayPage() {
         {data.day_note && <p className="notice">{data.day_note}</p>}
       </header>
 
-      <section aria-labelledby="today-lessons">
-        <h2 id="today-lessons" className="section__title">
-          Уроки
-        </h2>
-        {data.lessons.length === 0 ? (
-          <p className="muted">На сегодня уроков нет.</p>
-        ) : (
-          <ul className="lesson-list">
-            {data.lessons.map((l) => (
-              <LessonRow key={l.lesson_number} lesson={l} />
-            ))}
-          </ul>
-        )}
-      </section>
+      {hasSchedule && (
+        <section aria-labelledby="today-lessons">
+          <h2 id="today-lessons" className="section__title">
+            Уроки
+          </h2>
+          {data.lessons.length === 0 ? (
+            <p className="muted">На сегодня уроков нет.</p>
+          ) : (
+            <ul className="lesson-list">
+              {data.lessons.map((l) => (
+                <LessonRow key={l.lesson_number} lesson={l} />
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <HomeworkGroup title="На сегодня" items={data.homework_today} />
       <HomeworkGroup title="Просроченное" items={data.overdue} />

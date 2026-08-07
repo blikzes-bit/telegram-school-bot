@@ -20,6 +20,7 @@ from database.db import (
     set_chat_blocked, get_incomplete_homework_for_chats, get_schedule_for_chats,
     get_lesson_slots_for_chats, get_extra_activities, get_extra_activities_for_chats,
     get_day_overrides_for_chats, get_lesson_overrides_for_chats,
+    get_payments, get_unpaid_payments_for_chats, update_last_payment_reminder_date,
 )
 from handlers.extra import activities_on_date, format_extra_activities_block, format_extra_activity_line
 from services.effective_schedule import (
@@ -27,6 +28,7 @@ from services.effective_schedule import (
     format_effective_schedule_body, resolve_week_type,
 )
 import services.timeservice as ts
+from services import profiles
 from keyboards.inline import DAYS_RU
 from config import AUDIT_RETENTION_DAYS, HEARTBEAT_FILE
 from utils import html_escape, split_message
@@ -259,6 +261,54 @@ async def send_duetoday_reminder(
     return await _send_reminder(bot, chat_id, "duetoday", today, text.rstrip("\n"))
 
 
+async def send_payment_reminder(
+    bot: Bot, chat_id: int, tz: pytz.BaseTzInfo, payments=None,
+    today: Optional[datetime.date] = None,
+) -> bool:
+    """Nudge about money that is due soon or already overdue.
+
+    Each entry has its own "remind N days before", so what this sends and what
+    the app highlights as ``due_soon`` are the same set by construction. Sent
+    once per local day via the ``payment`` outbox kind, so a restart mid-send
+    cannot double-post.
+    """
+    today = today or datetime.datetime.now(tz).date()
+    if payments is None:
+        payments = await get_payments(chat_id, is_paid=False)
+
+    overdue = [p for p in payments if p.due_date < today]
+    soon = [
+        p for p in payments
+        if p.due_date >= today
+        and (p.due_date - today).days <= max(0, p.remind_days_before)
+    ]
+    if not overdue and not soon:
+        return True
+
+    lines = ["💳 <b>Об оплате</b>", ""]
+    if overdue:
+        lines.append("<b>Просрочено:</b>")
+        for p in overdue:
+            lines.append(
+                f"• {html_escape(p.title)} — "
+                f"{profiles.format_amount(p.amount_minor, p.currency)}, "
+                f"нужно было {p.due_date.strftime('%d.%m')}"
+            )
+        lines.append("")
+    if soon:
+        lines.append("<b>Скоро:</b>")
+        for p in soon:
+            when = "сегодня" if p.due_date == today else p.due_date.strftime("%d.%m")
+            lines.append(
+                f"• {html_escape(p.title)} — "
+                f"{profiles.format_amount(p.amount_minor, p.currency)}, {when}"
+            )
+
+    return await _send_reminder(
+        bot, chat_id, "payment", today, "\n".join(lines).rstrip("\n")
+    )
+
+
 # --- Extra-activity reminders (per activity, "N minutes before") ------------
 
 def _extra_occurrence(activity, tz: pytz.BaseTzInfo, now: datetime.datetime):
@@ -449,6 +499,7 @@ async def check_and_send_reminders(bot: Bot):
     # hours end and the clock is still past the configured time).
     clocks: dict = {}
     hw_due, sched_due, changes_due, duetoday_due = [], [], [], []
+    payment_due: list = []
     extra_chats = []
     for chat in chats:
         try:
@@ -465,6 +516,13 @@ async def check_and_send_reminders(bot: Bot):
                     changes_due.append(chat.chat_id)
                 if _due(chat.hw_duetoday_enabled, chat.last_duetoday_reminder_date, chat.hw_duetoday_time, current_hm, today):
                     duetoday_due.append(chat.chat_id)
+                # Payments only exist in the tutor profile, so this is normally
+                # an empty batch fetch for everybody else.
+                if profiles.features_for(chat).payments and _due(
+                    chat.payment_reminder_enabled, chat.last_payment_reminder_date,
+                    chat.payment_reminder_time, current_hm, today,
+                ):
+                    payment_due.append(chat.chat_id)
             if chat.extra_reminder_enabled:
                 extra_chats.append(chat.chat_id)
         except Exception as e:
@@ -477,6 +535,7 @@ async def check_and_send_reminders(bot: Bot):
     homework_by_chat = await get_incomplete_homework_for_chats(hw_ids)
     slots_by_chat = await get_lesson_slots_for_chats(sched_ids)
     extra_by_chat = await get_extra_activities_for_chats(list(set(extra_chats) | set(sched_due)))
+    payments_by_chat = await get_unpaid_payments_for_chats(payment_due)
 
     # Date-dependent fetches: one round per distinct local "tomorrow".
     chats_by_tomorrow: dict = defaultdict(list)
@@ -546,6 +605,12 @@ async def check_and_send_reminders(bot: Bot):
                     incomplete_homework=homework_by_chat.get(cid, []), today=today,
                 ):
                     await update_last_duetoday_reminder_date(cid, today)
+
+            if cid in payment_due:
+                if await send_payment_reminder(
+                    bot, cid, tz, payments=payments_by_chat.get(cid, []), today=today,
+                ):
+                    await update_last_payment_reminder_date(cid, today)
 
             if chat.extra_reminder_enabled:
                 await send_extra_activity_reminders(

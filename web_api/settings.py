@@ -35,6 +35,9 @@ class WebSettings:
     launch_token_ttl_seconds: int
     initdata_max_age_seconds: int
     cookie_name: str
+    # Bot username, used only to build ``t.me/<bot>/<app>?startapp=`` links for
+    # invitations. Optional: without it the dev fallback URL is used instead.
+    bot_username: str = ""
     allowed_origins: List[str] = field(default_factory=list)
     auth_rate_limit: int = 20
     auth_rate_window_seconds: int = 60
@@ -78,6 +81,7 @@ def load_settings() -> WebSettings:
         launch_token_ttl_seconds=_get_int("LAUNCH_TOKEN_TTL", 600),
         initdata_max_age_seconds=_get_int("INITDATA_MAX_AGE", 24 * 3600),
         cookie_name=os.getenv("SESSION_COOKIE_NAME", "school_web_session"),
+        bot_username=os.getenv("BOT_USERNAME", "").lstrip("@").strip(),
         allowed_origins=_split_origins(
             os.getenv("WEB_ALLOWED_ORIGINS", "http://localhost:5173")
         ),

@@ -1,10 +1,10 @@
-"""Web API — homework mutations (add / toggle completion).
+"""Web API — homework mutations (add / edit / delete / toggle completion).
 
-Adding is unrestricted for any class member. Completing/un-completing an
-existing entry is gated by ``hw_edit_policy``, enforced server-side exactly
-like the bot's ``services.permissions.can_edit_homework`` (see
-``can_edit_homework_sync``) — these tests exercise that gate through the HTTP
-layer, not just the pure function.
+Adding is unrestricted for any class member. Every change to an existing entry
+is gated by ``hw_edit_policy``, enforced server-side exactly like the bot's
+``services.permissions.can_edit_homework`` (see ``can_edit_homework_sync``) —
+these tests exercise that gate through the HTTP layer, not just the pure
+function.
 """
 import datetime
 
@@ -120,6 +120,123 @@ async def test_admin_only_policy_blocks_non_admin(db):
             json={"is_completed": True},
         )
         assert resp.status_code == 200
+
+
+async def test_edit_homework_updates_fields_and_journals_it(db):
+    settings = build_test_settings()
+    chat_id = -906
+    await _onboard(chat_id)
+    await _member(chat_id, 4009)
+    hw = await dbm.add_homework(chat_id, "Физика", MON, "старое")
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4009)
+        resp = await client.patch(
+            f"/api/v1/classes/{chat_id}/homework/{hw.id}",
+            json={"description": "новое", "due_date": "2024-03-05"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["description"] == "новое"
+        assert body["due_date"] == "2024-03-05"
+        assert body["subject_name"] == "Физика"  # untouched field stays put
+
+    stored = await dbm.get_homework_by_id(chat_id, hw.id)
+    assert stored.description == "новое"
+    assert stored.due_date == datetime.date(2024, 3, 5)
+
+    entries = await dbm.get_audit_logs(chat_id, "homework")
+    assert any(e.action == "update" and "дата сдачи" in (e.summary or "") for e in entries)
+
+
+async def test_edit_homework_empty_patch_is_a_no_op(db):
+    settings = build_test_settings()
+    chat_id = -907
+    await _onboard(chat_id)
+    await _member(chat_id, 4010)
+    hw = await dbm.add_homework(chat_id, "Химия", MON, "опыт")
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4010)
+        resp = await client.patch(f"/api/v1/classes/{chat_id}/homework/{hw.id}", json={})
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "опыт"
+
+
+async def test_edit_homework_rejects_blank_field(db):
+    settings = build_test_settings()
+    chat_id = -908
+    await _onboard(chat_id)
+    await _member(chat_id, 4011)
+    hw = await dbm.add_homework(chat_id, "Химия", MON, "опыт")
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4011)
+        resp = await client.patch(
+            f"/api/v1/classes/{chat_id}/homework/{hw.id}", json={"subject_name": "   "}
+        )
+        assert resp.status_code == 422
+
+
+async def test_edit_and_delete_respect_admin_only_policy(db):
+    settings = build_test_settings()
+    chat_id = -909
+    await _onboard(chat_id)
+    await dbm.set_hw_edit_policy(chat_id, "admin_only")
+    await _member(chat_id, 4012, role="member")
+    await _member(chat_id, 4013, role="admin")
+    hw = await dbm.add_homework(chat_id, "История", MON, "параграф 5")
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4012)
+        assert (
+            await client.patch(
+                f"/api/v1/classes/{chat_id}/homework/{hw.id}", json={"description": "x"}
+            )
+        ).status_code == 403
+        assert (
+            await client.delete(f"/api/v1/classes/{chat_id}/homework/{hw.id}")
+        ).status_code == 403
+
+    # The rejected edit must not have touched the row.
+    assert (await dbm.get_homework_by_id(chat_id, hw.id)).description == "параграф 5"
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4013)
+        assert (
+            await client.delete(f"/api/v1/classes/{chat_id}/homework/{hw.id}")
+        ).status_code == 204
+
+    assert await dbm.get_homework_by_id(chat_id, hw.id) is None
+
+
+async def test_delete_homework_missing_entry_is_404(db):
+    settings = build_test_settings()
+    chat_id = -910
+    await _onboard(chat_id)
+    await _member(chat_id, 4014)
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4014)
+        resp = await client.delete(f"/api/v1/classes/{chat_id}/homework/999999")
+        assert resp.status_code == 404
+
+
+async def test_delete_homework_scoped_to_its_own_chat(db):
+    """A homework id from another class must never be reachable."""
+    settings = build_test_settings()
+    mine, theirs = -911, -912
+    await _onboard(mine)
+    await _onboard(theirs)
+    await _member(mine, 4015)
+    foreign = await dbm.add_homework(theirs, "Чужое", MON, "не трогать")
+
+    async with web_client(settings) as (client, _s):
+        await authenticate(client, 4015)
+        resp = await client.delete(f"/api/v1/classes/{mine}/homework/{foreign.id}")
+        assert resp.status_code == 404
+
+    assert await dbm.get_homework_by_id(theirs, foreign.id) is not None
 
 
 async def test_creator_or_admin_policy_allows_own_entry(db):
