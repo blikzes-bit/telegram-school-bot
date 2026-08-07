@@ -8,10 +8,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
-from database.db import get_or_create_chat, finalize_onboarding
-from keyboards.reply import get_main_menu
+from database.db import get_or_create_chat, finalize_onboarding, set_chat_owner
+from keyboards.reply import main_menu_for
 from keyboards.inline import DAYS_RU
 from middleware.access import require_admin
+from services import profiles
 from utils import parse_time_interval, validate_against_previous, MAX_SUBJECT_LEN, html_escape
 
 router = Router()
@@ -30,6 +31,7 @@ NO_ANSWERS = {"нет", "no"}
 
 
 class OnboardingStates(StatesGroup):
+    waiting_for_profile = State()
     waiting_for_lessons_count = State()
     waiting_for_lesson_times = State()
     waiting_for_schedule_subjects = State()
@@ -124,22 +126,72 @@ async def reconfigure_confirm(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ob_reconfigure_cancel")
 async def reconfigure_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Отменено.")
-    await callback.message.answer("Ок, ничего не меняем.", reply_markup=get_main_menu())
+    await callback.message.answer("Ок, ничего не меняем.", reply_markup=await main_menu_for(callback.message.chat.id, callback.message.chat.type))
+
+
+def build_profile_keyboard() -> InlineKeyboardMarkup:
+    """One button per profile, each with its plain-words explanation below."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=profiles.PROFILE_LABELS[name], callback_data=f"ob_profile:{name}"
+        )]
+        for name in profiles.PROFILES
+    ])
 
 
 async def _begin_onboarding(message: Message, state: FSMContext):
+    """Step 1 is always "what is this chat for" — everything after it depends on
+    the answer (a tutor chat has no school timetable to set up at all)."""
     await state.clear()
-    await state.set_state(OnboardingStates.waiting_for_lessons_count)
+    await state.set_state(OnboardingStates.waiting_for_profile)
+    lines = ["1️⃣ <b>Шаг 1: Как будешь пользоваться?</b>", ""]
+    for name in profiles.PROFILES:
+        lines.append(
+            f"{profiles.PROFILE_LABELS[name]} — {profiles.PROFILE_DESCRIPTIONS[name]}"
+        )
+    lines += ["", "Выбери вариант кнопкой ниже. Потом это можно поменять в ⚙️ Настройках."]
     await message.answer(
-        "1️⃣ <b>Шаг 1 из 3: Количество уроков</b>\n\n"
-        "Сколько максимум уроков в день у тебя бывает?\n"
-        "Отправь мне число от 1 до 10 (например, <code>6</code>):",
+        "\n".join(lines),
+        reply_markup=build_profile_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(OnboardingStates.waiting_for_profile, F.data.startswith("ob_profile:"))
+async def process_profile_choice(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    profile = profiles.normalize(callback.data.split(":", 1)[1])
+    if profile is None:
+        await callback.answer("Не понял вариант, попробуй ещё раз.", show_alert=True)
+        return
+
+    await callback.answer()
+    # Remember who is setting this chat up: they become its owner, and the owner
+    # can never be locked out of their own chat by a rights change later.
+    await state.update_data(profile=profile, onboarding_actor_id=callback.from_user.id)
+    label = profiles.PROFILE_LABELS[profile]
+
+    if not profiles.needs_schedule_onboarding(profile):
+        # A tutor chat has no bell times and no weekly school timetable: asking
+        # for them would be pure friction. Finish here and let the tutor add the
+        # actual sessions as extra activities.
+        await _finalize_onboarding(callback.message, state, {}, lesson_slots=[])
+        return
+
+    await state.set_state(OnboardingStates.waiting_for_lessons_count)
+    await callback.message.answer(
+        f"Выбрано: <b>{label}</b>\n\n"
+        "2️⃣ <b>Шаг 2: Количество уроков</b>\n\n"
+        "Сколько максимум уроков в день бывает?\n"
+        "Отправь число от 1 до 10 (например, <code>6</code>):",
         reply_markup=get_cancel_markup(),
         parse_mode="HTML",
     )
 
 
 # Cancel any onboarding state
+@router.message(OnboardingStates.waiting_for_profile, F.text == "❌ Сбросить настройку")
 @router.message(OnboardingStates.waiting_for_lessons_count, F.text == "❌ Сбросить настройку")
 @router.message(OnboardingStates.waiting_for_lesson_times, F.text == "❌ Сбросить настройку")
 @router.message(OnboardingStates.waiting_for_schedule_subjects, F.text == "❌ Сбросить настройку")
@@ -152,6 +204,15 @@ async def cancel_onboarding(message: Message, state: FSMContext):
             keyboard=[[KeyboardButton(text="🚀 Начать настройку")]],
             resize_keyboard=True
         )
+    )
+
+
+@router.message(OnboardingStates.waiting_for_profile, F.text)
+async def profile_choice_needs_a_button(message: Message, state: FSMContext):
+    """Typing at step 1 is not an error worth scolding — just point at the buttons."""
+    await message.answer(
+        "Выбери один из вариантов кнопкой выше 👆",
+        reply_markup=build_profile_keyboard(),
     )
 
 
@@ -171,7 +232,7 @@ async def process_lessons_count(message: Message, state: FSMContext):
     await state.set_state(OnboardingStates.waiting_for_lesson_times)
 
     await message.answer(
-        "2️⃣ <b>Шаг 2 из 3: Время звонков</b>\n\n"
+        "3️⃣ <b>Шаг 3: Время звонков</b>\n\n"
         "Давай настроим время для каждого урока.",
         reply_markup=get_cancel_markup(),
         parse_mode="HTML",
@@ -233,7 +294,7 @@ async def _start_schedule_setup(message: Message, state: FSMContext, lesson_slot
     day_name = DAYS_RU[0]
     slot_time = f"{lesson_slots[0][1]} - {lesson_slots[0][2]}"
     await message.answer(
-        "3️⃣ <b>Шаг 3 из 3: Расписание предметов</b>\n\n"
+        "4️⃣ <b>Шаг 4: Расписание предметов</b>\n\n"
         f"📅 <b>{day_name}</b>\n"
         f"Урок №1 ({slot_time}): Какой предмет?\n"
         "Напиши название (например, <code>Математика</code>) или напиши <code>пропустить</code> / <code>skip</code>:",
@@ -459,24 +520,66 @@ async def _advance_to_next_day(message, state, target_days, current_day_list_idx
             await _finalize_onboarding(message, state, all_schedule_data)
 
 
-async def _finalize_onboarding(message: Message, state: FSMContext, all_schedule_data):
+async def _finalize_onboarding(
+    message: Message, state: FSMContext, all_schedule_data, lesson_slots=None
+):
     """
-    Persists the entire onboarding result — lesson slots, schedule for every
-    configured day, and the is_onboarded flag — in a single DB transaction
-    (see database.db.finalize_onboarding). If anything fails, nothing is
-    written and the chat's previous configuration (if any) is left intact.
+    Persists the entire onboarding result — the chosen profile and the settings
+    it starts from, lesson slots, schedule for every configured day, and the
+    is_onboarded flag — in a single DB transaction (see
+    database.db.finalize_onboarding). If anything fails, nothing is written and
+    the chat's previous configuration (if any) is left intact.
+
+    ``lesson_slots`` is normally collected in FSM state; the tutor profile
+    passes an empty list explicitly because it never asks for bell times.
     """
     chat_id = message.chat.id
     data = await state.get_data()
-    lesson_slots = data["lesson_slots"]
+    if lesson_slots is None:
+        lesson_slots = data["lesson_slots"]
+    profile = profiles.normalize(data.get("profile"))
 
-    await finalize_onboarding(chat_id, message.chat.type, lesson_slots, all_schedule_data)
+    # A profile's starting settings apply only when the profile actually
+    # changes. Re-running onboarding on the same profile must not quietly undo
+    # settings the chat has tuned by hand since.
+    chat = await get_or_create_chat(chat_id, message.chat.type)
+    extra: dict = {}
+    if profile is not None and profile != profiles.normalize(chat.profile):
+        d = profiles.defaults(profile)
+        extra = {
+            "hw_edit_policy": d.hw_edit_policy,
+            "schedule_reminder_enabled": d.schedule_reminder_enabled,
+            "changes_reminder_enabled": d.changes_reminder_enabled,
+        }
+
+    await finalize_onboarding(
+        chat_id, message.chat.type, lesson_slots, all_schedule_data,
+        profile=profile, **extra,
+    )
+    # First person to set the chat up owns it; a later re-run by somebody else
+    # does not take that away from them.
+    actor_id = data.get("onboarding_actor_id")
+    if actor_id is not None:
+        await set_chat_owner(chat_id, int(actor_id), only_if_empty=True)
     await state.clear()
+
+    if profile is not None and not profiles.needs_schedule_onboarding(profile):
+        await message.answer(
+            "🎉 <b>Готово!</b>\n\n"
+            f"Режим: <b>{profiles.PROFILE_LABELS[profile]}</b>. Школьного расписания "
+            "здесь нет — сами занятия добавляй в разделе «🎯 Доп. занятия»: "
+            "название, день, время и место.\n"
+            "Домашние задания и напоминания работают как обычно.",
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type),
+            parse_mode="HTML",
+        )
+        return
+
     await message.answer(
         "🎉 <b>Настройка завершена!</b>\n\n"
         "Все данные успешно сохранены. Теперь ты можешь полноценно пользоваться ботом!\n"
         "Вот твоё главное меню ниже 👇",
-        reply_markup=get_main_menu(),
+        reply_markup=await main_menu_for(message.chat.id, message.chat.type),
         parse_mode="HTML",
     )
 
@@ -522,6 +625,7 @@ async def onboarding_non_text(message: Message):
 router.message.register(
     onboarding_non_text,
     StateFilter(
+        OnboardingStates.waiting_for_profile,
         OnboardingStates.waiting_for_lessons_count,
         OnboardingStates.waiting_for_lesson_times,
         OnboardingStates.waiting_for_schedule_subjects,

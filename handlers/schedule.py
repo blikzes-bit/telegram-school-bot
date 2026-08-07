@@ -13,7 +13,7 @@ from database.db import (
 from handlers.extra import activities_for_weekday, format_extra_activities_block
 from services.effective_schedule import resolve_week_type, WEEK_LABELS
 from keyboards.inline import get_schedule_days_keyboard, DAYS_RU, get_cancel_keyboard
-from keyboards.reply import get_main_menu
+from keyboards.reply import main_menu_for
 from middleware.access import require_admin
 import services.audit as audit
 import services.timeservice as ts
@@ -258,7 +258,7 @@ async def process_new_subject_name(message: Message, state: FSMContext):
 
     await message.answer(
         f"✅ Предмет для урока №{lesson_num} обновлен!",
-        reply_markup=get_main_menu()
+        reply_markup=await main_menu_for(message.chat.id, message.chat.type)
     )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -414,7 +414,7 @@ async def process_edit_lesson_times(message: Message, state: FSMContext):
 
         await message.answer(
             "✅ Время звонков успешно обновлено!",
-            reply_markup=get_main_menu()
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type)
         )
 
         # Display schedule for Monday (current week)

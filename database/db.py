@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from database.models import (
     Base, Chat, LessonSlot, Schedule, Homework, ReminderJob, ExtraActivity,
     DayOverride, LessonOverride, AuditLog, HomeworkAttachment,
-    WebUser, ChatMembership, WebLaunchToken, WebSession,
+    WebUser, ChatMembership, ChatInvite, HomeworkCompletion, Payment,
+    WebLaunchToken, WebSession,
 )
 from config import DATABASE_URL
 
@@ -76,6 +77,21 @@ async def init_db():
             f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TIMEZONE}'",
         )
         await _ensure_column(conn, "chats", "title", "VARCHAR")
+        # NULL on purpose: "profile never chosen", resolved from chat_type.
+        await _ensure_column(conn, "chats", "profile", "VARCHAR")
+        # NULL access_mode means "Telegram admin status decides", as before.
+        await _ensure_column(conn, "chats", "access_mode", "VARCHAR")
+        await _ensure_column(conn, "chats", "owner_user_id", "BIGINT")
+        await _ensure_column(conn, "chat_memberships", "app_role", "VARCHAR")
+        await _ensure_column(
+            conn, "chats", "payment_reminder_enabled", "BOOLEAN NOT NULL DEFAULT 1"
+        )
+        await _ensure_column(
+            conn, "chats", "payment_reminder_time", "VARCHAR NOT NULL DEFAULT '10:00'"
+        )
+        await _ensure_column(conn, "chats", "last_payment_reminder_date", "DATE")
+        # NULL means "one shared mark for the chat" — how every chat behaved before.
+        await _ensure_column(conn, "chats", "per_student_homework", "BOOLEAN")
         # Authorship columns; NULL for every pre-existing row by design.
         for table in ("homework", "extra_activities", "day_overrides", "lesson_overrides"):
             await _ensure_column(conn, table, "created_by_user_id", "BIGINT")
@@ -262,19 +278,41 @@ async def finalize_onboarding(
     chat_type: str,
     lesson_slots: List[Tuple[int, str, str]],
     schedule_by_day: Dict[int, List[Tuple[int, str]]],
+    *,
+    profile: Optional[str] = None,
+    hw_edit_policy: Optional[str] = None,
+    schedule_reminder_enabled: Optional[bool] = None,
+    changes_reminder_enabled: Optional[bool] = None,
 ):
     """
     Atomically persists the full result of onboarding (or re-onboarding):
-    chat_type, lesson slots, the schedule for every day of the week, and the
-    ``is_onboarded`` flag — all in one transaction. Either everything commits
-    together, or (on any error) nothing is written and the chat's previous
-    state is left completely untouched.
+    chat_type, lesson slots, the schedule for every day of the week, the chosen
+    profile with the settings that profile starts from, and the ``is_onboarded``
+    flag — all in one transaction. Either everything commits together, or (on
+    any error) nothing is written and the chat's previous state is left
+    completely untouched.
 
     Days absent from ``schedule_by_day`` (e.g. Saturday was configured before
     but is skipped this time) are cleared, matching the new configuration
     exactly rather than merging with stale leftovers.
+
+    The optional keyword arguments are the chosen profile and *its* starting
+    settings (see ``services.profiles``). Each is written only when given, so a
+    caller that omits them changes nothing — which is what a re-onboarding that
+    keeps the same profile does, rather than resetting settings the chat has
+    since tuned by hand. An unknown ``profile`` is ignored rather than written.
     """
+    from services.profiles import PROFILES
     max_lesson_number = max((num for num, _, _ in lesson_slots), default=0)
+    final_values: dict = {"is_onboarded": True}
+    if profile in PROFILES:
+        final_values["profile"] = profile
+    if hw_edit_policy is not None:
+        final_values["hw_edit_policy"] = hw_edit_policy
+    if schedule_reminder_enabled is not None:
+        final_values["schedule_reminder_enabled"] = schedule_reminder_enabled
+    if changes_reminder_enabled is not None:
+        final_values["changes_reminder_enabled"] = changes_reminder_enabled
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Chat).where(Chat.chat_id == chat_id))
@@ -302,7 +340,7 @@ async def finalize_onboarding(
                     ))
 
         await session.execute(
-            update(Chat).where(Chat.chat_id == chat_id).values(is_onboarded=True)
+            update(Chat).where(Chat.chat_id == chat_id).values(**final_values)
         )
         await session.commit()
 
@@ -1002,6 +1040,7 @@ REMINDER_CATEGORY_FLAGS = {
     "duetoday": "hw_duetoday_enabled",
     "changes": "changes_reminder_enabled",
     "extra": "extra_reminder_enabled",
+    "payment": "payment_reminder_enabled",
 }
 
 
@@ -1016,6 +1055,14 @@ async def set_reminder_category_enabled(chat_id: int, category: str, enabled: bo
         )
         await session.commit()
         return True
+
+
+async def update_payment_reminder_time(chat_id: int, hhmm: str):
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(payment_reminder_time=hhmm)
+        )
+        await session.commit()
 
 
 async def update_duetoday_time(chat_id: int, hhmm: str):
@@ -1089,6 +1136,290 @@ async def set_chat_timezone(chat_id: int, tz_name: str) -> bool:
         )
         await session.commit()
         return True
+
+
+# --- Per-student homework completion -----------------------------------------
+
+async def set_per_student_homework(chat_id: int, enabled: bool) -> bool:
+    """Turn the personal-marks layer on or off for a chat."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(
+                per_student_homework=enabled
+            )
+        )
+        await session.commit()
+        return True
+
+
+async def set_homework_done_by(
+    chat_id: int, homework_id: int, user_id: int, done: bool, completed_at: str
+) -> bool:
+    """Record (or withdraw) *one person's* "I have done this".
+
+    Scoped through ``homework`` by ``chat_id``, so an id from another chat can
+    never be marked. Idempotent in both directions: marking twice is one row,
+    unmarking something that was never marked is a no-op. Returns ``False`` only
+    when the homework does not belong to this chat.
+    """
+    async with AsyncSessionLocal() as session:
+        owned = await session.execute(
+            select(Homework.id)
+            .where(Homework.chat_id == chat_id)
+            .where(Homework.id == homework_id)
+        )
+        if owned.scalar_one_or_none() is None:
+            return False
+
+        if not done:
+            await session.execute(
+                delete(HomeworkCompletion)
+                .where(HomeworkCompletion.homework_id == homework_id)
+                .where(HomeworkCompletion.user_id == user_id)
+            )
+            await session.commit()
+            return True
+
+        session.add(HomeworkCompletion(
+            homework_id=homework_id, user_id=user_id, completed_at=completed_at
+        ))
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Already marked (unique constraint) — the desired state either way.
+            await session.rollback()
+        return True
+
+
+async def get_homework_completions(
+    chat_id: int, user_id: Optional[int] = None
+) -> Dict[int, List[int]]:
+    """``{homework_id: [user_id, …]}`` for one chat.
+
+    With ``user_id`` given, only that person's marks — enough to answer "have *I*
+    done it" for a whole list in a single query rather than one per item.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(HomeworkCompletion.homework_id, HomeworkCompletion.user_id)
+            .join(Homework, Homework.id == HomeworkCompletion.homework_id)
+            .where(Homework.chat_id == chat_id)
+        )
+        if user_id is not None:
+            stmt = stmt.where(HomeworkCompletion.user_id == user_id)
+        result = await session.execute(stmt)
+        grouped: Dict[int, List[int]] = defaultdict(list)
+        for homework_id, uid in result.all():
+            grouped[homework_id].append(uid)
+        return dict(grouped)
+
+
+# --- Payments (tutor profile) ------------------------------------------------
+
+PAYMENT_PERIODS = ("one_time", "monthly", "per_lesson")
+
+
+async def add_payment(
+    chat_id: int,
+    title: str,
+    amount_minor: int,
+    due_date: datetime.date,
+    currency: str = "UAH",
+    period: str = "one_time",
+    note: Optional[str] = None,
+    remind_days_before: int = 1,
+    actor_user_id: Optional[int] = None,
+    actor_name: Optional[str] = None,
+) -> Payment:
+    async with AsyncSessionLocal() as session:
+        payment = Payment(
+            chat_id=chat_id,
+            title=title.strip(),
+            amount_minor=max(0, int(amount_minor)),
+            currency=(currency or "UAH").strip() or "UAH",
+            due_date=due_date,
+            period=period if period in PAYMENT_PERIODS else "one_time",
+            note=(note.strip() if note else None),
+            remind_days_before=min(30, max(0, int(remind_days_before))),
+            **_authorship_on_create(actor_user_id, actor_name),
+        )
+        session.add(payment)
+        await session.commit()
+        await session.refresh(payment)
+        return payment
+
+
+async def get_payments(
+    chat_id: int, is_paid: Optional[bool] = None
+) -> List[Payment]:
+    """Payments of one chat, soonest due first."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Payment).where(Payment.chat_id == chat_id)
+        if is_paid is not None:
+            stmt = stmt.where(Payment.is_paid == is_paid)
+        result = await session.execute(stmt.order_by(Payment.due_date, Payment.id))
+        return list(result.scalars().all())
+
+
+async def get_payment_by_id(chat_id: int, payment_id: int) -> Optional[Payment]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Payment)
+            .where(Payment.chat_id == chat_id)
+            .where(Payment.id == payment_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def update_payment(
+    chat_id: int,
+    payment_id: int,
+    actor_user_id: Optional[int] = None,
+    actor_name: Optional[str] = None,
+    **fields,
+) -> bool:
+    """Update given fields of one payment, always scoped to its chat.
+
+    Unknown keys are ignored rather than trusted, and ``period`` is validated
+    here so a hand-crafted request cannot store a value the app cannot render.
+    """
+    allowed = {
+        "title", "amount_minor", "currency", "due_date", "period", "note",
+        "remind_days_before",
+    }
+    values = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if "period" in values and values["period"] not in PAYMENT_PERIODS:
+        return False
+    if "amount_minor" in values:
+        values["amount_minor"] = max(0, int(values["amount_minor"]))
+    if "remind_days_before" in values:
+        values["remind_days_before"] = min(30, max(0, int(values["remind_days_before"])))
+    for text_field in ("title", "currency", "note"):
+        if text_field in values and isinstance(values[text_field], str):
+            values[text_field] = values[text_field].strip()
+    if not values:
+        return False
+    values.update(_authorship_on_update(actor_user_id, actor_name))
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(Payment)
+            .where(Payment.chat_id == chat_id)
+            .where(Payment.id == payment_id)
+            .values(**values)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def set_payment_paid(
+    chat_id: int,
+    payment_id: int,
+    is_paid: bool,
+    paid_at: Optional[str],
+    actor_user_id: Optional[int] = None,
+    actor_name: Optional[str] = None,
+) -> bool:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(Payment)
+            .where(Payment.chat_id == chat_id)
+            .where(Payment.id == payment_id)
+            .values(
+                is_paid=is_paid,
+                paid_at=paid_at if is_paid else None,
+                **_authorship_on_update(actor_user_id, actor_name),
+            )
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def delete_payment(chat_id: int, payment_id: int) -> bool:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            delete(Payment)
+            .where(Payment.chat_id == chat_id)
+            .where(Payment.id == payment_id)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def get_unpaid_payments_for_chats(chat_ids: List[int]) -> Dict[int, List[Payment]]:
+    """Batch fetch for the reminder sweep (one query, not one per chat)."""
+    if not chat_ids:
+        return {}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Payment)
+            .where(Payment.chat_id.in_(chat_ids))
+            .where(Payment.is_paid.is_(False))
+            .order_by(Payment.due_date, Payment.id)
+        )
+        grouped: Dict[int, List[Payment]] = defaultdict(list)
+        for row in result.scalars().all():
+            grouped[row.chat_id].append(row)
+        return dict(grouped)
+
+
+async def update_last_payment_reminder_date(chat_id: int, date: datetime.date):
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(
+                last_payment_reminder_date=date
+            )
+        )
+        await session.commit()
+
+
+# --- Chat profile (what this chat is for) ------------------------------------
+
+async def set_chat_profile(chat_id: int, profile: str) -> bool:
+    """
+    Set what this chat is for (``personal`` / ``class`` / ``tutor``).
+
+    Unknown values are rejected rather than written — same posture as
+    ``set_hw_edit_policy`` — so a stale button or a hand-crafted request can
+    never put a chat into a profile the app does not understand.
+    """
+    from services.profiles import PROFILES
+    if profile not in PROFILES:
+        return False
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(profile=profile)
+        )
+        await session.commit()
+        return True
+
+
+# --- Class display name -----------------------------------------------------
+
+async def set_chat_title(
+    chat_id: int, title: Optional[str], only_if_empty: bool = False
+) -> bool:
+    """
+    Set this chat's human-readable class name (shown in the Mini App picker).
+
+    ``None`` or a blank string clears it back to "no name set", which is the
+    state every pre-existing chat is in. Over-long input is truncated rather
+    than rejected: the name is cosmetic, and losing a rename because it was one
+    character too long would be worse than shortening it.
+
+    ``only_if_empty=True`` writes only when no name is stored yet. That is what
+    the bot's automatic fill from ``Update.chat.title`` uses, so a name a user
+    deliberately chose is never overwritten by Telegram's group title.
+    """
+    from utils import MAX_CHAT_TITLE_LEN
+    cleaned: Optional[str] = (title or "").strip()[:MAX_CHAT_TITLE_LEN] or None
+    async with AsyncSessionLocal() as session:
+        stmt = update(Chat).where(Chat.chat_id == chat_id)
+        if only_if_empty:
+            stmt = stmt.where(or_(Chat.title.is_(None), Chat.title == ""))
+        result = await session.execute(stmt.values(title=cleaned))
+        await session.commit()
+        return result.rowcount > 0
 
 
 # --- Audit log --------------------------------------------------------------
@@ -1932,6 +2263,185 @@ async def get_memberships_for_user(user_id: int) -> List[ChatMembership]:
             .order_by(ChatMembership.chat_id)
         )
         return list(result.scalars().all())
+
+
+async def get_memberships_for_chat(chat_id: int) -> List[ChatMembership]:
+    """Everyone who has access to this chat's data, oldest membership first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .order_by(ChatMembership.created_at, ChatMembership.id)
+        )
+        return list(result.scalars().all())
+
+
+async def get_web_users_by_ids(user_ids: List[int]) -> Dict[int, WebUser]:
+    """Display names for a batch of Telegram ids (one query, not N)."""
+    if not user_ids:
+        return {}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WebUser).where(WebUser.telegram_user_id.in_(user_ids))
+        )
+        return {u.telegram_user_id: u for u in result.scalars().all()}
+
+
+async def set_member_app_role(chat_id: int, user_id: int, app_role: Optional[str]) -> bool:
+    """
+    Assign (or clear, with ``None``) a member's role inside the app.
+
+    Unknown roles are rejected rather than written — same posture as the other
+    role/policy setters — so a stale or hand-crafted request can never store a
+    role the permission core does not understand. Returns ``False`` when the
+    membership does not exist, which the caller reports as "not found".
+    """
+    from services.permissions import ASSIGNABLE_ROLES
+    if app_role is not None and app_role not in ASSIGNABLE_ROLES:
+        return False
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .where(ChatMembership.user_id == user_id)
+            .values(app_role=app_role)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def delete_membership(chat_id: int, user_id: int) -> bool:
+    """Revoke someone's access to a chat's data. Their web sessions stay valid
+    but every class-scoped request will now 403, because access is decided by
+    this row (see ``web_api.deps.require_class``)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            delete(ChatMembership)
+            .where(ChatMembership.chat_id == chat_id)
+            .where(ChatMembership.user_id == user_id)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def set_access_mode(chat_id: int, mode: str) -> bool:
+    """Switch a chat between Telegram-derived and role-based rights."""
+    from services.permissions import ACCESS_MODES
+    if mode not in ACCESS_MODES:
+        return False
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Chat).where(Chat.chat_id == chat_id).values(access_mode=mode)
+        )
+        await session.commit()
+        return True
+
+
+async def set_chat_owner(chat_id: int, user_id: Optional[int], only_if_empty: bool = False) -> bool:
+    """
+    Record who owns this chat (always allowed to manage it).
+
+    ``only_if_empty=True`` is what onboarding uses: the first person to set the
+    chat up becomes its owner, and a later re-run by somebody else does not
+    quietly take ownership away from them.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = update(Chat).where(Chat.chat_id == chat_id)
+        if only_if_empty:
+            stmt = stmt.where(Chat.owner_user_id.is_(None))
+        result = await session.execute(stmt.values(owner_user_id=user_id))
+        await session.commit()
+        return result.rowcount > 0
+
+
+# --- Invitations -------------------------------------------------------------
+
+async def create_chat_invite(
+    token_hash: str,
+    chat_id: int,
+    app_role: str,
+    created_at: str,
+    expires_at: str,
+    created_by_user_id: Optional[int] = None,
+    created_by_name: Optional[str] = None,
+) -> ChatInvite:
+    """Store a new invitation. Only the token *hash* is ever persisted."""
+    async with AsyncSessionLocal() as session:
+        invite = ChatInvite(
+            token_hash=token_hash,
+            chat_id=chat_id,
+            app_role=app_role,
+            created_by_user_id=created_by_user_id,
+            created_by_name=created_by_name,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+        return invite
+
+
+async def get_chat_invites(chat_id: int, include_used: bool = False) -> List[ChatInvite]:
+    """Invitations of one chat, newest first."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(ChatInvite).where(ChatInvite.chat_id == chat_id)
+        if not include_used:
+            stmt = stmt.where(ChatInvite.used_at.is_(None))
+        result = await session.execute(stmt.order_by(ChatInvite.id.desc()))
+        return list(result.scalars().all())
+
+
+async def delete_chat_invite(chat_id: int, invite_id: int) -> bool:
+    """Revoke an invitation before it is used. Scoped by ``chat_id`` so an id
+    from another chat can never be revoked by guessing it."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            delete(ChatInvite)
+            .where(ChatInvite.chat_id == chat_id)
+            .where(ChatInvite.id == invite_id)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def consume_chat_invite(
+    token_hash: str, now_iso: str, used_by_user_id: int
+) -> Optional[ChatInvite]:
+    """
+    Atomically claim an unused invitation.
+
+    The ``UPDATE … WHERE used_at IS NULL`` is the single-use guarantee: a second
+    concurrent (or later) attempt updates zero rows and gets ``None``. Expiry is
+    checked by the caller against the returned row — consuming an expired invite
+    is harmless because the caller refuses to act on it.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(ChatInvite)
+            .where(ChatInvite.token_hash == token_hash)
+            .where(ChatInvite.used_at.is_(None))
+            .values(used_at=now_iso, used_by_user_id=used_by_user_id)
+        )
+        await session.commit()
+        if result.rowcount != 1:
+            return None
+        row = await session.execute(
+            select(ChatInvite).where(ChatInvite.token_hash == token_hash)
+        )
+        return row.scalar_one_or_none()
+
+
+async def cleanup_expired_invites(before_iso: str) -> int:
+    """Housekeeping: drop used or long-expired invitations."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            delete(ChatInvite).where(
+                or_(ChatInvite.used_at.is_not(None), ChatInvite.expires_at < before_iso)
+            )
+        )
+        await session.commit()
+        return result.rowcount or 0
 
 
 async def get_chats_by_ids(chat_ids: List[int]) -> Dict[int, Chat]:

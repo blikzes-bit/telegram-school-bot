@@ -8,19 +8,23 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from database.db import (
     get_or_create_chat, update_chat_reminder_times,
     delete_chat, set_reminder_category_enabled, update_duetoday_time, set_quiet_hours,
-    set_hw_edit_policy, set_chat_timezone,
+    set_hw_edit_policy, set_access_mode, set_chat_owner, set_chat_profile,
+    set_chat_timezone,
 )
 import services.timeservice as ts
 from services.timeservice import has_quiet_hours
+from services import profiles
 from services.permissions import (
-    POLICY_DESCRIPTIONS, POLICY_LABELS, normalize_policy,
+    ACCESS_MODE_DESCRIPTIONS, ACCESS_MODE_LABELS, ACCESS_MODES,
+    POLICY_DESCRIPTIONS, POLICY_LABELS, normalize_access_mode, normalize_policy,
 )
 import services.audit as audit
 from keyboards.inline import (
-    get_settings_keyboard, get_general_settings_keyboard, get_cancel_keyboard,
-    get_hw_policy_keyboard, get_timezone_keyboard, get_timezone_confirm_keyboard,
+    get_settings_keyboard, get_general_settings_keyboard, get_access_mode_keyboard,
+    get_cancel_keyboard, get_hw_policy_keyboard, get_profile_keyboard,
+    get_timezone_keyboard, get_timezone_confirm_keyboard,
 )
-from keyboards.reply import get_main_menu
+from keyboards.reply import main_menu_for
 from middleware.access import require_admin
 from utils import html_escape, safe_edit_text
 
@@ -87,16 +91,34 @@ async def format_general_settings_message(chat_id: int, chat_type: str = "privat
     "⏰ Напоминания" screen (see :func:`format_settings_message`)."""
     chat = await get_or_create_chat(chat_id, chat_type)
     policy = normalize_policy(chat.hw_edit_policy)
-    return (
-        "⚙️ <b>Настройки</b>\n\n"
+    profile = profiles.resolve(chat)
+    lines = [
+        "⚙️ <b>Настройки</b>",
+        "",
+        f"🧩 <b>Режим</b>: {profiles.PROFILE_LABELS[profile]} — "
+        f"{profiles.PROFILE_DESCRIPTIONS[profile]}.",
         f"🌍 <b>Часовой пояс</b>: {html_escape(ts.tz_label(ts.chat_tz(chat)))} — "
-        f"местное время <b>{ts.local_time_label(ts.chat_tz(chat))}</b>.\n"
-        f"✍️ <b>Кто может изменять ДЗ</b>: {POLICY_LABELS[policy]} — {POLICY_DESCRIPTIONS[policy]}.\n\n"
-        "📜 <b>История изменений</b> — журнал важных действий.\n"
-        "💾 <b>Данные и резервная копия</b> — экспорт, импорт, восстановление.\n"
-        "⚙️ <b>Сброс</b> — полностью очистить настройки чата.\n\n"
-        "Выберите раздел кнопками ниже:"
-    )
+        f"местное время <b>{ts.local_time_label(ts.chat_tz(chat))}</b>.",
+    ]
+    if profiles.features(profile).homework_policy:
+        mode = normalize_access_mode(chat.access_mode)
+        lines.append(
+            f"🔐 <b>Кто вносит данные</b>: {ACCESS_MODE_LABELS[mode]} — "
+            f"{ACCESS_MODE_DESCRIPTIONS[mode]}."
+        )
+        lines.append(
+            f"✍️ <b>Кто может изменять ДЗ</b>: {POLICY_LABELS[policy]} — "
+            f"{POLICY_DESCRIPTIONS[policy]}."
+        )
+    lines += [
+        "",
+        "📜 <b>История изменений</b> — журнал важных действий.",
+        "💾 <b>Данные и резервная копия</b> — экспорт, импорт, восстановление.",
+        "⚙️ <b>Сброс</b> — полностью очистить настройки чата.",
+        "",
+        "Выберите раздел кнопками ниже:",
+    ]
+    return "\n".join(lines)
 
 
 async def get_settings_keyboard_for_chat(chat_id: int, chat_type: str = "private"):
@@ -190,7 +212,7 @@ async def process_hw_time(message: Message, state: FSMContext):
     await _audit_settings(message, f"время напоминания о ДЗ: {std_time}")
     await state.clear()
 
-    await message.answer(f"✅ Время напоминания о ДЗ успешно изменено на <b>{std_time}</b>!", reply_markup=get_main_menu(), parse_mode="HTML")
+    await message.answer(f"✅ Время напоминания о ДЗ успешно изменено на <b>{std_time}</b>!", reply_markup=await main_menu_for(message.chat.id, message.chat.type), parse_mode="HTML")
 
     settings_text = await format_settings_message(message.chat.id, message.chat.type)
     kb = await get_settings_keyboard_for_chat(message.chat.id, message.chat.type)
@@ -211,7 +233,7 @@ async def process_sch_time(message: Message, state: FSMContext):
     await _audit_settings(message, f"время напоминания о портфеле: {std_time}")
     await state.clear()
 
-    await message.answer(f"✅ Время напоминания о портфеле успешно изменено на <b>{std_time}</b>!", reply_markup=get_main_menu(), parse_mode="HTML")
+    await message.answer(f"✅ Время напоминания о портфеле успешно изменено на <b>{std_time}</b>!", reply_markup=await main_menu_for(message.chat.id, message.chat.type), parse_mode="HTML")
 
     settings_text = await format_settings_message(message.chat.id, message.chat.type)
     kb = await get_settings_keyboard_for_chat(message.chat.id, message.chat.type)
@@ -229,7 +251,7 @@ async def process_duetoday_time(message: Message, state: FSMContext):
     await update_duetoday_time(message.chat.id, std_time)
     await _audit_settings(message, f"время напоминания о ДЗ в день сдачи: {std_time}")
     await state.clear()
-    await message.answer(f"✅ Время напоминания о ДЗ в день сдачи изменено на <b>{std_time}</b>!", reply_markup=get_main_menu(), parse_mode="HTML")
+    await message.answer(f"✅ Время напоминания о ДЗ в день сдачи изменено на <b>{std_time}</b>!", reply_markup=await main_menu_for(message.chat.id, message.chat.type), parse_mode="HTML")
     settings_text = await format_settings_message(message.chat.id, message.chat.type)
     kb = await get_settings_keyboard_for_chat(message.chat.id, message.chat.type)
     await message.answer(settings_text, reply_markup=kb, parse_mode="HTML")
@@ -246,7 +268,7 @@ async def process_quiet_hours(message: Message, state: FSMContext):
         await set_quiet_hours(message.chat.id, None, None)
         await _audit_settings(message, "тихие часы отключены")
         await state.clear()
-        await message.answer("✅ Тихие часы отключены.", reply_markup=get_main_menu())
+        await message.answer("✅ Тихие часы отключены.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
     elif QUIET_FORMAT.match(text):
         start_raw, end_raw = text.split("-")
         sh, sm = map(int, start_raw.strip().split(":"))
@@ -258,7 +280,7 @@ async def process_quiet_hours(message: Message, state: FSMContext):
         await set_quiet_hours(message.chat.id, start, end)
         await _audit_settings(message, f"тихие часы: {start}-{end}")
         await state.clear()
-        await message.answer(f"✅ Тихие часы установлены: <b>{start}–{end}</b>.", reply_markup=get_main_menu(), parse_mode="HTML")
+        await message.answer(f"✅ Тихие часы установлены: <b>{start}–{end}</b>.", reply_markup=await main_menu_for(message.chat.id, message.chat.type), parse_mode="HTML")
     else:
         await message.answer(
             "Неверный формат! Введите интервал <code>ЧЧ:ММ-ЧЧ:ММ</code> (например, <code>22:00-07:00</code>) "
@@ -477,6 +499,91 @@ async def set_hw_policy(callback: CallbackQuery, state: FSMContext):
     await _audit_settings(callback, f"права на изменение ДЗ: {POLICY_LABELS[policy]}")
     await _refresh_general(callback)
     await callback.answer(f"Готово: {POLICY_LABELS[policy]}")
+
+
+@router.callback_query(F.data == "set_profile")
+async def show_profile(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    chat = await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
+    current = profiles.resolve(chat)
+    lines = "\n".join(
+        f"• <b>{profiles.PROFILE_LABELS[name]}</b> — {profiles.PROFILE_DESCRIPTIONS[name]}"
+        for name in profiles.PROFILES
+    )
+    await safe_edit_text(
+        callback.message,
+        "🧩 <b>Как используется этот чат</b>\n\n"
+        f"{lines}\n\n"
+        f"Сейчас: <b>{profiles.PROFILE_LABELS[current]}</b>.\n\n"
+        "<i>Режим влияет только на то, какие разделы показываются. Ничего не "
+        "удаляется: если переключиться обратно, расписание и все записи снова "
+        "будут на месте. Права участников режим не меняет.</i>",
+        reply_markup=get_profile_keyboard(current),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_profile_set:"))
+async def set_profile(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    profile = callback.data.split(":", 1)[1]
+    # set_chat_profile rejects anything unknown, so a stale or hand-crafted
+    # callback can't put the chat into a profile the app doesn't understand.
+    if not await set_chat_profile(callback.message.chat.id, profile):
+        await callback.answer("⚠️ Неизвестный режим.", show_alert=True)
+        return
+    await _audit_settings(callback, f"режим чата: {profiles.PROFILE_LABELS[profile]}")
+    await _refresh_general(callback)
+    await callback.answer(f"Готово: {profiles.PROFILE_LABELS[profile]}")
+
+
+@router.callback_query(F.data == "set_access")
+async def show_access_mode(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    chat = await get_or_create_chat(callback.message.chat.id, callback.message.chat.type)
+    current = normalize_access_mode(chat.access_mode)
+    lines = "\n".join(
+        f"• <b>{ACCESS_MODE_LABELS[mode]}</b> — {ACCESS_MODE_DESCRIPTIONS[mode]}"
+        for mode in ACCESS_MODES
+    )
+    await safe_edit_text(
+        callback.message,
+        "🔐 <b>Кто вносит данные</b>\n\n"
+        f"{lines}\n\n"
+        f"Сейчас: <b>{ACCESS_MODE_LABELS[current]}</b>.\n\n"
+        "<i>Во втором варианте роли выдаёт владелец чата в приложении "
+        "(раздел «Участники»). Тот, кому роль не выдали, может только смотреть. "
+        "Владелец чата остаётся владельцем всегда — потерять доступ к своему "
+        "чату нельзя.</i>",
+        reply_markup=get_access_mode_keyboard(current),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_access_set:"))
+async def pick_access_mode(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin(callback, callback.bot):
+        return
+    await state.clear()
+    mode = callback.data.split(":", 1)[1]
+    # Turning on role mode is what makes "only chosen people write" real, so the
+    # switcher must also make sure this chat *has* an owner — otherwise nobody
+    # would be able to hand out roles afterwards.
+    if not await set_access_mode(callback.message.chat.id, mode):
+        await callback.answer("⚠️ Неизвестный режим.", show_alert=True)
+        return
+    await set_chat_owner(callback.message.chat.id, callback.from_user.id, only_if_empty=True)
+    await _audit_settings(callback, f"кто вносит данные: {ACCESS_MODE_LABELS[mode]}")
+    await _refresh_general(callback)
+    await callback.answer(f"Готово: {ACCESS_MODE_LABELS[mode]}")
 
 
 @router.callback_query(F.data == "set_duetoday_time")

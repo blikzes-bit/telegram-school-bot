@@ -13,7 +13,7 @@ from middleware.access import ChatContextMiddleware, OnboardingGuardMiddleware
 # Import routers
 from handlers import (
     common, onboarding, today, schedule, homework, settings, migration, extra,
-    date_overrides, history, data_backup, status, web,
+    date_overrides, history, data_backup, payments, status, web,
 )
 
 # Configure logging
@@ -41,6 +41,7 @@ BOT_COMMANDS = [
     BotCommand(command="schedule", description="📅 Расписание"),
     BotCommand(command="homework", description="📝 Домашнее задание"),
     BotCommand(command="extra", description="🎯 Доп. занятия"),
+    BotCommand(command="payments", description="💳 Оплата"),
     BotCommand(command="web", description="🌐 Приложение"),
     BotCommand(command="settings", description="⚙️ Настройки"),
     BotCommand(command="help", description="❓ Помощь"),
@@ -127,6 +128,7 @@ async def main():
     for gated_router in (
         today.router, schedule.router, homework.router, settings.router,
         extra.router, date_overrides.router, history.router, data_backup.router,
+        payments.router,
     ):
         gated_router.message.outer_middleware(guard)
         gated_router.callback_query.outer_middleware(guard)
@@ -149,6 +151,7 @@ async def main():
     dp.include_router(date_overrides.router)
     dp.include_router(history.router)
     dp.include_router(data_backup.router)
+    dp.include_router(payments.router)
 
     # Setup background reminder scheduler
     scheduler = setup_scheduler(bot)

@@ -3,7 +3,11 @@ from typing import Optional
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from services.permissions import HW_EDIT_POLICIES, POLICY_LABELS, normalize_policy
+from services import profiles
+from services.permissions import (
+    ACCESS_MODE_LABELS, ACCESS_MODES, HW_EDIT_POLICIES, POLICY_LABELS,
+    normalize_access_mode, normalize_policy,
+)
 from services.timeservice import POPULAR_TIMEZONES
 
 DAYS_RU = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
@@ -224,25 +228,46 @@ def get_settings_keyboard(chat) -> InlineKeyboardMarkup:
 
 def get_general_settings_keyboard(chat) -> InlineKeyboardMarkup:
     """
-    General-settings keyboard ("⚙️ Настройки"): timezone, homework-edit policy,
-    change history, data/backup and the full reset. Notification categories live
-    behind the "⏰ Напоминания" button so the two screens don't duplicate.
+    General-settings keyboard ("⚙️ Настройки"): chat profile, timezone,
+    homework-edit policy, change history, data/backup and the full reset.
+    Notification categories live behind the "⏰ Напоминания" button so the two
+    screens don't duplicate. Rows that the chat's profile does not use are left
+    out entirely rather than shown and refused.
     """
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [
             InlineKeyboardButton(text="⏰ Напоминания", callback_data="set_reminders"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🧩 Режим: {profiles.label(profiles.resolve(chat))}",
+                callback_data="set_profile",
+            ),
         ],
         [
             InlineKeyboardButton(
                 text=f"🌍 Часовой пояс: {chat.timezone}", callback_data="set_tz"
             ),
         ],
-        [
+    ]
+    # Rights only need configuring where there is more than one person.
+    if profiles.features_for(chat).homework_policy:
+        rows.append([
+            InlineKeyboardButton(
+                text=(
+                    "🔐 Кто вносит данные: "
+                    f"{ACCESS_MODE_LABELS[normalize_access_mode(getattr(chat, 'access_mode', None))]}"
+                ),
+                callback_data="set_access",
+            ),
+        ])
+        rows.append([
             InlineKeyboardButton(
                 text=f"✍️ Права на ДЗ: {POLICY_LABELS[normalize_policy(chat.hw_edit_policy)]}",
                 callback_data="set_hw_policy",
             ),
-        ],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows + [
         [
             InlineKeyboardButton(text="📜 История изменений", callback_data="au_open"),
         ],
@@ -310,6 +335,43 @@ def get_hw_policy_keyboard(current: str) -> InlineKeyboardMarkup:
         mark = "• " if policy == current else ""
         rows.append([InlineKeyboardButton(
             text=f"{mark}{POLICY_LABELS[policy]}", callback_data=f"set_hw_policy_set:{policy}"
+        )])
+    rows.append([InlineKeyboardButton(text="🔙 Назад к настройкам", callback_data="set_general")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- 🧩 Режим чата -----------------------------------------------------------
+
+def get_profile_keyboard(current: Optional[str]) -> InlineKeyboardMarkup:
+    """
+    Picker for what the chat is for. The active profile is marked; the choice is
+    still validated server-side when the button is tapped.
+    """
+    rows = []
+    for name in profiles.PROFILES:
+        mark = "• " if name == current else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{profiles.PROFILE_LABELS[name]}",
+            callback_data=f"set_profile_set:{name}",
+        )])
+    rows.append([InlineKeyboardButton(text="🔙 Назад к настройкам", callback_data="set_general")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- 🔐 Кто вносит данные ----------------------------------------------------
+
+def get_access_mode_keyboard(current: str) -> InlineKeyboardMarkup:
+    """
+    Picker for how rights are decided in this chat. The active mode is marked;
+    the choice is validated server-side when the button is tapped.
+    """
+    current = normalize_access_mode(current)
+    rows = []
+    for mode in ACCESS_MODES:
+        mark = "• " if mode == current else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{ACCESS_MODE_LABELS[mode]}",
+            callback_data=f"set_access_set:{mode}",
         )])
     rows.append([InlineKeyboardButton(text="🔙 Назад к настройкам", callback_data="set_general")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

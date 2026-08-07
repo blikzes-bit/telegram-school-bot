@@ -21,7 +21,7 @@ from keyboards.inline import (
     get_attachment_collect_keyboard, get_attachment_menu_keyboard,
     get_attachment_delete_confirm_keyboard,
 )
-from keyboards.reply import get_main_menu
+from keyboards.reply import main_menu_for
 from keyboards.calendar import build_calendar, month_token, parse_month
 import services.audit as audit
 import services.timeservice as ts
@@ -43,17 +43,21 @@ STALE_BUTTON_TEXT = "⚠️ Эта кнопка устарела, открой �
 EDIT_FIELD_LABELS = {"subject": "предмет", "desc": "описание", "date": "дата сдачи"}
 
 
-async def _guard(event, homework) -> bool:
+async def _guard(event, homework, *, completing: bool = False) -> bool:
     """
-    Server-side homework-edit policy check for one entry.
+    Server-side rights check for one entry: role first, then the chat's
+    homework-edit policy (see ``services.permissions``).
 
     Every mutating handler calls this *before* touching the DB — hiding a button
     is not protection, a stale or hand-crafted callback must be rejected here.
-    Reads the live Chat row so a policy change takes effect immediately.
+    Reads the live Chat row so a rights change takes effect immediately.
+
+    ``completing=True`` is the looser gate used by the "выполнено"/"вернуть"
+    buttons: a student may tick homework off without being able to rewrite it.
     """
     chat_id = event.message.chat.id if hasattr(event, "data") else event.chat.id
     chat = await get_chat(chat_id)
-    return await require_homework_access(event, chat, homework)
+    return await require_homework_access(event, chat, homework, completing=completing)
 
 
 def _author_lines(hw, tz=None) -> str:
@@ -462,7 +466,7 @@ async def process_attachment_upload(message: Message, state: FSMContext):
 
     if (message.text or "").strip() == "❌ Отмена":
         await state.clear()
-        await message.answer("Добавление вложения отменено.", reply_markup=get_main_menu())
+        await message.answer("Добавление вложения отменено.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
 
     info, error = extract_attachment(message)
@@ -489,7 +493,7 @@ async def process_attachment_upload(message: Message, state: FSMContext):
         await state.clear()
         await message.answer(
             "⚠️ Это задание уже не существует (возможно, было удалено).",
-            reply_markup=get_main_menu(),
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type),
         )
         return
     if result.status == "limit":
@@ -497,7 +501,7 @@ async def process_attachment_upload(message: Message, state: FSMContext):
         await message.answer(
             f"⚠️ К одному заданию можно приложить не больше {MAX_ATTACHMENTS_PER_HOMEWORK} "
             "файлов. Удали лишнее и попробуй снова.",
-            reply_markup=get_main_menu(),
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type),
         )
         return
     if result.status == "duplicate":
@@ -514,7 +518,7 @@ async def process_attachment_upload(message: Message, state: FSMContext):
         ),
     )
     await state.clear()
-    await message.answer("✅ Вложение добавлено!", reply_markup=get_main_menu())
+    await message.answer("✅ Вложение добавлено!", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
 
     rendered = await render_attachment_menu(chat_id, hw_id, is_archive, page)
     if rendered is not None:
@@ -600,7 +604,7 @@ async def _set_completed(callback: CallbackQuery, hw_id: int, page: int, complet
     """Shared body of the complete/restore buttons (they differ only in flag)."""
     chat_id = callback.message.chat.id
     hw = await get_homework_by_id(chat_id, hw_id)
-    if not await _guard(callback, hw):
+    if not await _guard(callback, hw, completing=True):
         return
     actor_user_id, actor_name = audit.actor_from(callback)
     ok = await mark_homework_completed(
@@ -835,7 +839,7 @@ async def process_edit_value(message: Message, state: FSMContext):
     if not updated:
         await message.answer(
             "⚠️ Это задание уже не существует (возможно, было удалено).",
-            reply_markup=get_main_menu()
+            reply_markup=await main_menu_for(message.chat.id, message.chat.type)
         )
     else:
         await audit.record_event(
@@ -846,7 +850,7 @@ async def process_edit_value(message: Message, state: FSMContext):
                 audit.fields_summary([EDIT_FIELD_LABELS.get(field, field)]),
             ),
         )
-        await message.answer("✅ Задание успешно обновлено!", reply_markup=get_main_menu())
+        await message.answer("✅ Задание успешно обновлено!", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
 
     hw_text, kb = await format_homework_list(message.chat.id, is_archive=is_archive, page=page)
     await message.answer(hw_text, reply_markup=kb, parse_mode="HTML")
@@ -961,7 +965,7 @@ async def process_subject_text(message: Message, state: FSMContext):
     subject = message.text.strip()
     if subject == "❌ Отмена":
         await state.clear()
-        await message.answer("Добавление отменено.", reply_markup=get_main_menu())
+        await message.answer("Добавление отменено.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
 
     if not subject:
@@ -986,7 +990,7 @@ async def process_description(message: Message, state: FSMContext):
     description = message.text.strip()
     if description == "❌ Отмена":
         await state.clear()
-        await message.answer("Добавление отменено.", reply_markup=get_main_menu())
+        await message.answer("Добавление отменено.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
 
     if not description:
@@ -1034,7 +1038,7 @@ async def process_add_attachment(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if text == "❌ Отмена":
         await state.clear()
-        await message.answer("Добавление отменено.", reply_markup=get_main_menu())
+        await message.answer("Добавление отменено.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
 
     data = await state.get_data()
@@ -1186,7 +1190,7 @@ async def process_due_date_callback(callback: CallbackQuery, state: FSMContext):
         pass
     await callback.message.answer(
         f"✅ Домашнее задание по предмету <b>{safe_sub}</b> на {due_date.strftime('%d.%m')} сохранено!",
-        reply_markup=get_main_menu(),
+        reply_markup=await main_menu_for(callback.message.chat.id, callback.message.chat.type),
         parse_mode="HTML"
     )
     text, kb = await format_homework_list(callback.message.chat.id, is_archive=False)
@@ -1229,7 +1233,7 @@ async def process_due_date_text(message: Message, state: FSMContext):
     text = message.text.strip()
     if text == "❌ Отмена":
         await state.clear()
-        await message.answer("Добавление отменено.", reply_markup=get_main_menu())
+        await message.answer("Добавление отменено.", reply_markup=await main_menu_for(message.chat.id, message.chat.type))
         return
 
     try:
@@ -1255,7 +1259,7 @@ async def process_due_date_text(message: Message, state: FSMContext):
     safe_sub = html_escape(subject)
     await message.answer(
         f"✅ Домашнее задание по предмету <b>{safe_sub}</b> на {due_date.strftime('%d.%m')} сохранено!",
-        reply_markup=get_main_menu(),
+        reply_markup=await main_menu_for(message.chat.id, message.chat.type),
         parse_mode="HTML"
     )
     hw_text, kb = await format_homework_list(message.chat.id, is_archive=False)

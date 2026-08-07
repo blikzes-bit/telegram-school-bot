@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 
 import { renderWithProviders } from "../test/utils";
-import { todayFixture } from "../test/fixtures";
+import { classSettingsFixture, todayFixture } from "../test/fixtures";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -18,6 +18,8 @@ vi.mock("../api/client", async (importOriginal) => {
       schedule: vi.fn(),
       homework: vi.fn(),
       createHomework: vi.fn(),
+      updateHomework: vi.fn(),
+      deleteHomework: vi.fn(),
       setHomeworkCompleted: vi.fn(),
       extra: vi.fn(),
       createExtra: vi.fn(),
@@ -25,6 +27,8 @@ vi.mock("../api/client", async (importOriginal) => {
       deleteExtra: vi.fn(),
       reminderSettings: vi.fn(),
       updateReminderSettings: vi.fn(),
+      classSettings: vi.fn(),
+      updateClassSettings: vi.fn(),
       auditLog: vi.fn(),
       exportUrl: vi.fn(),
     },
@@ -48,6 +52,11 @@ function renderAt(chatPath: string, element: ReactElement) {
 }
 
 describe("dashboard states", () => {
+  beforeEach(() => {
+    // Both screens read the chat profile to decide what to show.
+    mockApi.classSettings.mockResolvedValue(classSettingsFixture);
+  });
+
   it("renders lessons and homework", async () => {
     mockApi.today.mockResolvedValue(todayFixture);
     renderAt("/classes/-100/today", <TodayPage />);

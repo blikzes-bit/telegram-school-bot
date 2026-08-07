@@ -21,4 +21,6 @@ async def today(
     the_date = parse_date_param(date, "date")
     if the_date is None:
         the_date = await ts.today_for_chat_id(chat_id)
-    return await build_today(chat_id, the_date, ctx.permissions, user_id=ctx.membership.user_id)
+    return await build_today(
+        chat_id, the_date, ctx.permissions, ctx.caps, user_id=ctx.membership.user_id
+    )

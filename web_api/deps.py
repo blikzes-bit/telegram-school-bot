@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import database.db as db
 from application.dto import PermissionsDTO
 from database.models import Chat, ChatMembership, WebUser
+from services.permissions import Capabilities, capabilities
 from web_api.security import hash_token
 from web_api.settings import WebSettings, get_settings
 
@@ -98,28 +99,41 @@ async def get_current_user(
     return user
 
 
-def build_permissions(chat: Optional[Chat], membership: ChatMembership) -> PermissionsDTO:
-    """Server-computed capabilities for this user in this class.
+def build_capabilities(chat: Optional[Chat], membership: ChatMembership) -> Capabilities:
+    """What this member may do here, via the shared permission core.
 
-    Read-only in stage 1, but computed the same way the bot enforces edits so a
-    future mutation endpoint can reuse it. Private chats have a single user and
-    therefore no admin restriction.
+    ``membership.role`` is the Telegram role the bot recorded when the user last
+    launched the app, which is what the default (``telegram``) access mode reads;
+    ``membership.app_role`` is what role mode reads. Both live on the verified
+    membership row — nothing here comes from the request.
     """
-    is_private = getattr(chat, "chat_type", None) == "private"
-    is_admin = is_private or membership.role == "admin"
-    policy = getattr(chat, "hw_edit_policy", "collaborative")
+    return capabilities(
+        chat,
+        user_id=membership.user_id,
+        is_telegram_admin=membership.role == "admin",
+        app_role=membership.app_role,
+    )
 
-    if is_private:
-        can_edit_homework = True
-    elif policy == "admin_only":
-        can_edit_homework = is_admin
-    else:  # collaborative | creator_or_admin — members may edit (their own/all)
-        can_edit_homework = True
 
+def build_permissions(chat: Optional[Chat], membership: ChatMembership) -> PermissionsDTO:
+    """The capability set, shaped for the wire."""
+    caps = build_capabilities(chat, membership)
+    policy_allows_editing = caps.can_edit_homework and (
+        getattr(chat, "hw_edit_policy", "collaborative") != "admin_only" or caps.is_admin
+    )
     return PermissionsDTO(
-        is_admin=is_admin,
-        can_edit_homework=can_edit_homework,
-        can_edit_schedule=is_admin,
+        role=caps.role,
+        is_owner=caps.is_owner,
+        is_admin=caps.is_admin,
+        # Whether *some* existing entry is editable. Each entry additionally
+        # carries its own ``can_edit`` (the creator_or_admin policy is per-entry).
+        can_edit_homework=policy_allows_editing,
+        can_edit_schedule=caps.can_edit_schedule,
+        can_add_homework=caps.can_add_homework,
+        can_complete_homework=caps.can_complete_homework,
+        can_edit_extra=caps.can_edit_extra,
+        can_edit_payments=caps.can_edit_payments,
+        can_manage_members=caps.can_manage_members,
     )
 
 
@@ -129,6 +143,7 @@ class ClassContext:
     chat: Optional[Chat]
     membership: ChatMembership
     permissions: PermissionsDTO
+    caps: Capabilities
 
 
 def _membership_is_stale(
@@ -177,7 +192,10 @@ async def require_class(
             detail="class access has expired, open the app again from the chat with /web",
         )
     chat = await db.get_chat(chat_id)
-    permissions = build_permissions(chat, membership)
     return ClassContext(
-        chat_id=chat_id, chat=chat, membership=membership, permissions=permissions
+        chat_id=chat_id,
+        chat=chat,
+        membership=membership,
+        permissions=build_permissions(chat, membership),
+        caps=build_capabilities(chat, membership),
     )

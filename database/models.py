@@ -68,6 +68,13 @@ class Chat(Base):
     last_duetoday_reminder_date = Column(Date, nullable=True)
     last_changes_reminder_date = Column(Date, nullable=True)
 
+    # Master switch and time for payment reminders (the tutor profile's money
+    # side). Nullable/defaulted so existing chats are unaffected: no payments
+    # exist for them, so nothing is ever sent regardless.
+    payment_reminder_enabled = Column(Boolean, default=True, nullable=False)
+    payment_reminder_time = Column(String, default="10:00", nullable=False)  # HH:MM
+    last_payment_reminder_date = Column(Date, nullable=True)
+
     # Quiet hours (HH:MM, may wrap past midnight). During quiet hours non-urgent
     # reminders are deferred; both NULL means "no quiet hours".
     quiet_start = Column(String, nullable=True)
@@ -96,6 +103,40 @@ class Chat(Base):
     # Nullable so every pre-existing chat keeps working with no name set.
     title = Column(String, nullable=True)
 
+    # What this chat is for: "personal" (one person's diary) | "class" (a school
+    # class) | "tutor" (lessons with a tutor, no school timetable).
+    # NULL means "never asked" and is resolved from ``chat_type`` at read time
+    # (services/profiles.resolve), which reproduces exactly how every chat
+    # behaved before profiles existed — so no existing chat needed a backfill.
+    # Like ``hw_edit_policy`` this carries no DB CHECK: the allowed set lives in
+    # ``services.profiles`` and is enforced by ``db.set_chat_profile``.
+    profile = Column(String, nullable=True)
+
+    # How rights are decided in this chat:
+    #   * NULL / "telegram" — Telegram admin status decides, exactly as before
+    #     app roles existed. This is the default and what every pre-existing
+    #     chat keeps.
+    #   * "roles"           — the per-member ``chat_memberships.app_role``
+    #     decides, and anybody without a role is a viewer (read-only). This is
+    #     the explicit "only I and the people I picked enter data" switch.
+    # Enforced by ``services.permissions``; written via ``db.set_access_mode``.
+    access_mode = Column(String, nullable=True)
+
+    # Does every student tick homework off for themselves?
+    #   * NULL / False — one shared mark for the whole chat (the default, and
+    #     what every pre-existing chat keeps).
+    #   * True         — each person has their own mark in the Mini App, and the
+    #     teacher sees how many are done. Chat-wide messages and reminders are
+    #     unaffected either way: they follow ``Homework.is_completed``, because a
+    #     group message cannot be personal (see HomeworkCompletion).
+    per_student_homework = Column(Boolean, nullable=True)
+
+    # Telegram id of whoever set this chat up. Always allowed to manage members
+    # and settings, so a chat can never lock its own owner out. NULL for chats
+    # that predate this column — their owner is unknown and rights fall back to
+    # Telegram admin status.
+    owner_user_id = Column(BigInteger, nullable=True)
+
     # Relationships
     lesson_slots = relationship("LessonSlot", back_populates="chat", cascade="all, delete-orphan")
     schedules = relationship("Schedule", back_populates="chat", cascade="all, delete-orphan")
@@ -104,6 +145,7 @@ class Chat(Base):
     day_overrides = relationship("DayOverride", back_populates="chat", cascade="all, delete-orphan")
     lesson_overrides = relationship("LessonOverride", back_populates="chat", cascade="all, delete-orphan")
     audit_entries = relationship("AuditLog", back_populates="chat", cascade="all, delete-orphan")
+    payments = relationship("Payment", back_populates="chat", cascade="all, delete-orphan")
 
 class LessonSlot(Base):
     __tablename__ = "lesson_slots"
@@ -351,6 +393,90 @@ class LessonOverride(Base, AuthorshipMixin):
     chat = relationship("Chat", back_populates="lesson_overrides")
 
 
+class HomeworkCompletion(Base):
+    """"*I* have done this one" — one row per (homework, person).
+
+    A layer **on top of** ``Homework.is_completed``, never a replacement for it:
+
+      * ``Homework.is_completed`` stays what it always was — the class-level "this
+        task is closed" flag, set by whoever may edit the entry, and the only
+        thing chat-wide messages and reminders look at. A group message is seen
+        by everybody, so it cannot be personal, and one student ticking a box
+        must never silence the reminder for the other twenty-nine.
+      * these rows are personal and only affect what *that* person sees in the
+        Mini App, plus the count of who is done that the teacher sees.
+
+    Only used when the chat opts in via ``chats.per_student_homework``; a chat
+    that never opts in has no rows here and behaves exactly as before.
+    """
+
+    __tablename__ = "homework_completions"
+    __table_args__ = (
+        UniqueConstraint(
+            "homework_id", "user_id", name="uq_homework_completions_hw_user"
+        ),
+        Index("ix_homework_completions_hw", "homework_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    homework_id = Column(
+        Integer, ForeignKey("homework.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id = Column(BigInteger, nullable=False)  # Telegram user id
+    completed_at = Column(String, nullable=False)  # ISO-8601 UTC
+
+
+class Payment(Base):
+    """One thing that has to be paid for — the tutor profile's money side.
+
+    Deliberately dumb bookkeeping: a title, an amount, a due date and a paid
+    flag. No balances, no invoices, no arithmetic the user cannot see. The bot
+    reminds about unpaid entries as their due date approaches; that is the whole
+    feature ("скажи, когда платить").
+
+    ``amount_minor`` is an **integer in minor units** (kopecks/cents), never a
+    float: money must not accumulate binary rounding error. ``currency`` is a
+    free short label so a tutor can write ₴, zł or whatever they actually use.
+    ``period`` is informational — it tells the reader whether this is a one-off,
+    a monthly fee or per-lesson pay; nothing is auto-created from it.
+    """
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        CheckConstraint(
+            "period IN ('one_time', 'monthly', 'per_lesson')",
+            name="ck_payments_period",
+        ),
+        CheckConstraint("amount_minor >= 0", name="ck_payments_amount_non_negative"),
+        CheckConstraint(
+            "remind_days_before BETWEEN 0 AND 30", name="ck_payments_remind_days"
+        ),
+        Index("ix_payments_chat_due", "chat_id", "due_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
+    title = Column(String, nullable=False)
+    amount_minor = Column(Integer, nullable=False, default=0)
+    currency = Column(String, nullable=False, default="UAH")
+    due_date = Column(Date, nullable=False)
+    period = Column(String, nullable=False, default="one_time")
+    is_paid = Column(Boolean, nullable=False, default=False)
+    paid_at = Column(String, nullable=True)  # ISO-8601 UTC
+    note = Column(String, nullable=True)
+    # How many days before the due date to remind (0 = on the day itself).
+    remind_days_before = Column(Integer, nullable=False, default=1)
+
+    created_by_user_id = Column(BigInteger, nullable=True)
+    created_by_name = Column(String, nullable=True)
+    updated_by_user_id = Column(BigInteger, nullable=True)
+    updated_by_name = Column(String, nullable=True)
+    created_at = Column(String, nullable=True)  # ISO-8601 UTC
+    updated_at = Column(String, nullable=True)  # ISO-8601 UTC
+
+    chat = relationship("Chat", back_populates="payments")
+
+
 class AuditLog(Base):
     """
     Append-only journal of the important changes made in a chat.
@@ -476,6 +602,12 @@ class ChatMembership(Base):
     chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
     user_id = Column(BigInteger, nullable=False)  # Telegram user id
     role = Column(String, nullable=False, default="member")  # member|admin
+    # Role *inside the app*: owner | editor | student | viewer. Deliberately a
+    # separate, nullable column rather than a widening of ``role`` above, whose
+    # CHECK constraint and Telegram-derived meaning stay exactly as they were.
+    # NULL means "no app role assigned" and, in the default ``telegram`` access
+    # mode, rights are derived from ``role`` as before. See services/permissions.
+    app_role = Column(String, nullable=True)
     last_verified_at = Column(String, nullable=False)  # ISO-8601 UTC
     created_at = Column(String, nullable=False)        # ISO-8601 UTC
 
@@ -502,6 +634,41 @@ class WebLaunchToken(Base):
     created_at = Column(String, nullable=False)  # ISO-8601 UTC
     expires_at = Column(String, nullable=False)  # ISO-8601 UTC
     used_at = Column(String, nullable=True)      # ISO-8601 UTC, set on consume
+
+
+class ChatInvite(Base):
+    """An invitation that grants one person a chosen role in one chat.
+
+    This is the only way somebody who is **not** in the Telegram chat (a parent,
+    say) can be given access, so it is treated as a credential:
+
+      * the raw token is random and shown to the owner exactly once — only its
+        keyed hash is stored, like launch tokens and sessions;
+      * it is single-use (atomic ``UPDATE … WHERE used_at IS NULL``) and expires;
+      * it carries the role it grants, chosen by the owner when minting it, so
+        redeeming it can never grant more than was intended;
+      * it can be revoked before use (the row is deleted).
+
+    ``created_by_user_id`` is kept so the audit trail can say who invited whom.
+    """
+
+    __tablename__ = "chat_invites"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_chat_invites_hash"),
+        Index("ix_chat_invites_hash", "token_hash"),
+        Index("ix_chat_invites_chat", "chat_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token_hash = Column(String, nullable=False)
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)
+    app_role = Column(String, nullable=False)          # role granted on redeem
+    created_by_user_id = Column(BigInteger, nullable=True)
+    created_by_name = Column(String, nullable=True)
+    created_at = Column(String, nullable=False)        # ISO-8601 UTC
+    expires_at = Column(String, nullable=False)        # ISO-8601 UTC
+    used_at = Column(String, nullable=True)            # ISO-8601 UTC, set on redeem
+    used_by_user_id = Column(BigInteger, nullable=True)
 
 
 class WebSession(Base):
